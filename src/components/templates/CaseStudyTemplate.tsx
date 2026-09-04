@@ -8,17 +8,36 @@ import { getAvatarImage } from "@/lib/avatars";
 import type { CaseStudySection } from "@/lib/caseStudySections";
 import { avatarForIndex } from "./types";
 import { ASMRBackground } from "@/components/ui/asmr-background";
+import { LunarBackground } from "@/components/ui/lunar-background";
 
 if (typeof window !== "undefined") gsap.registerPlugin(ScrollTrigger);
+
+export type CaseStudyTheme = "light" | "space" | "lunar";
 
 export interface CaseStudyTemplateProps {
   title: string;
   sections: CaseStudySection[];
   sectionAudio: Record<string, string>;
   avatars: Avatar[];
-  /** Renders the Space template's particle backdrop + dark glass-panel copy instead of the plain white layout. */
-  spaceTheme?: boolean;
+  /** Renders the Space/Lunar template's backdrop + dark glass-panel copy instead of the plain white layout. */
+  theme?: CaseStudyTheme;
 }
+
+const THEME_CONFIG: Record<CaseStudyTheme, { label: string | null; accent: string; border: string; glow: string }> = {
+  light: { label: null, accent: "text-neutral-400", border: "border-neutral-100", glow: "" },
+  space: {
+    label: "Space",
+    accent: "text-white/30",
+    border: "border-white/5",
+    glow: "drop-shadow-[0_0_60px_rgba(180,220,255,0.15)]",
+  },
+  lunar: {
+    label: "Lunar",
+    accent: "text-cyan-200/50",
+    border: "border-cyan-500/10",
+    glow: "drop-shadow-[0_0_60px_rgba(120,180,255,0.2)]",
+  },
+};
 
 /**
  * The case-study experience — pixel-for-pixel the same pinned-avatar,
@@ -27,19 +46,21 @@ export interface CaseStudyTemplateProps {
  * Impact sections produced by the layout-binding agent (see
  * caseStudySections.ts) instead of raw chunks. Case-study projects always
  * use this layout regardless of selectedTemplateId (see renderStaticSite) —
- * `spaceTheme` is how they still pick up the Space template's background
- * rather than losing access to it entirely.
+ * `theme` is how they still pick up the Space/Lunar templates' backgrounds
+ * rather than losing access to them entirely.
  */
-export default function CaseStudyTemplate({ title, sections, sectionAudio, avatars, spaceTheme }: CaseStudyTemplateProps) {
+export default function CaseStudyTemplate({ title, sections, sectionAudio, avatars, theme = "light" }: CaseStudyTemplateProps) {
   const containerRef = useRef<HTMLDivElement>(null);
+  const isDark = theme !== "light";
+  const { label, accent, border, glow } = THEME_CONFIG[theme];
 
   useEffect(() => {
     const ctx = gsap.context(() => {
       const sectionEls = gsap.utils.toArray<HTMLElement>(".case-study-section");
       let currentAudio: HTMLAudioElement | null = null;
       let currentHandler: (() => void) | null = null;
-      const spokenClass = spaceTheme ? "text-white" : "text-neutral-900";
-      const unspokenClass = spaceTheme ? "text-white/25" : "text-neutral-300";
+      const spokenClass = isDark ? "text-white" : "text-neutral-900";
+      const unspokenClass = isDark ? "text-white/25" : "text-neutral-300";
 
       function stopHighlightTracking() {
         if (currentAudio && currentHandler) currentAudio.removeEventListener("timeupdate", currentHandler);
@@ -126,14 +147,15 @@ export default function CaseStudyTemplate({ title, sections, sectionAudio, avata
       });
     }, containerRef);
     return () => ctx.revert();
-  }, [sections, spaceTheme]);
+  }, [sections, theme]);
 
   return (
-    <div ref={containerRef} className={spaceTheme ? "relative text-white" : "bg-white text-neutral-900"}>
-      {spaceTheme && <ASMRBackground />}
+    <div ref={containerRef} className={isDark ? "relative text-white" : "bg-white text-neutral-900"}>
+      {theme === "space" && <ASMRBackground />}
+      {theme === "lunar" && <LunarBackground />}
       <header className="relative px-10 pb-16 pt-24">
-        {spaceTheme && <span className="text-xs font-light uppercase tracking-[0.4em] text-white/30">Space</span>}
-        <h1 className={`max-w-3xl text-4xl font-medium leading-tight md:text-5xl ${spaceTheme ? "mt-4" : ""}`}>
+        {label && <span className={`text-xs font-light uppercase tracking-[0.4em] ${accent}`}>{label}</span>}
+        <h1 className={`max-w-3xl text-4xl font-medium leading-tight md:text-5xl ${isDark ? "mt-4" : ""}`}>
           {title}
         </h1>
       </header>
@@ -148,9 +170,9 @@ export default function CaseStudyTemplate({ title, sections, sectionAudio, avata
         return (
           <section
             key={section.key}
-            className={`case-study-section relative flex min-h-screen flex-col items-center gap-10 px-8 py-20 md:gap-16 md:px-16 ${
-              spaceTheme ? "border-t border-white/5" : "border-t border-neutral-100"
-            } ${isReversed ? "md:flex-row-reverse" : "md:flex-row"}`}
+            className={`case-study-section relative flex min-h-screen flex-col items-center gap-10 px-8 py-20 md:gap-16 md:px-16 border-t ${border} ${
+              isReversed ? "md:flex-row-reverse" : "md:flex-row"
+            }`}
           >
             <div className="flex w-full flex-shrink-0 justify-center md:w-[36%]">
               {avatarImage && (
@@ -158,25 +180,17 @@ export default function CaseStudyTemplate({ title, sections, sectionAudio, avata
                 <img
                   src={avatarImage}
                   alt=""
-                  className={`h-[280px] w-[280px] object-contain md:h-[420px] md:w-[420px] ${
-                    spaceTheme ? "drop-shadow-[0_0_60px_rgba(180,220,255,0.15)]" : ""
-                  }`}
+                  className={`h-[280px] w-[280px] object-contain md:h-[420px] md:w-[420px] ${glow}`}
                 />
               )}
             </div>
 
             <div
               className={`case-study-copy flex w-full flex-col gap-6 md:w-[64%] ${
-                spaceTheme
-                  ? "rounded-2xl border border-white/5 bg-white/[0.02] p-8 backdrop-blur-sm"
-                  : ""
+                isDark ? `rounded-2xl border ${border} bg-white/[0.02] p-8 backdrop-blur-sm` : ""
               }`}
             >
-              <span
-                className={`text-xs font-medium uppercase tracking-wide ${
-                  spaceTheme ? "text-white/30" : "text-neutral-400"
-                }`}
-              >
+              <span className={`text-xs font-medium uppercase tracking-wide ${accent}`}>
                 {section.sectionLabel}
               </span>
               <h2 className="text-2xl font-medium md:text-3xl">{section.title}</h2>
@@ -187,7 +201,7 @@ export default function CaseStudyTemplate({ title, sections, sectionAudio, avata
                 {words.map((word, i) => (
                   <span
                     key={i}
-                    className={`word transition-colors duration-150 ${spaceTheme ? "text-white/25" : "text-neutral-300"}`}
+                    className={`word transition-colors duration-150 ${isDark ? "text-white/25" : "text-neutral-300"}`}
                   >
                     {word}{" "}
                   </span>

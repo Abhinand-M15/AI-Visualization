@@ -25,6 +25,11 @@ export const TEMPLATES: TemplateInfo[] = [
     name: "Space",
     description: "A living particle field drifts behind every section, reacting to the cursor with a magnetic swirl. Dark, atmospheric, glass-panel copy.",
   },
+  {
+    id: "lunar",
+    name: "Lunar",
+    description: "A real 3D moon orbited by a drifting asteroid belt sits behind every section. Cinematic, slow-turning, cool blue-cyan glass-panel copy.",
+  },
 ];
 
 export function getTemplateById(id: string): TemplateInfo | undefined {

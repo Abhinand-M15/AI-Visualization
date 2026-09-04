@@ -4,6 +4,7 @@ import { flattenCaseStudySections, type CaseStudySection } from "@/lib/caseStudy
 
 const GSAP_CDN = "https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.5/gsap.min.js";
 const SCROLLTRIGGER_CDN = "https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.5/ScrollTrigger.min.js";
+const THREE_CDN = "https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js";
 
 function escapeHtml(input: string): string {
   return input
@@ -45,7 +46,7 @@ function avatarImagePath(chunk: Chunk, index: number, avatars: Avatar[]): string
   return bundlePath(getAvatarImage(avatar, chunk.emotion));
 }
 
-function documentWrap(title: string, css: string, body: string, js: string): string {
+function documentWrap(title: string, css: string, body: string, js: string, extraScripts: string[] = []): string {
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -56,6 +57,7 @@ function documentWrap(title: string, css: string, body: string, js: string): str
 </head>
 <body>
 ${body}
+${extraScripts.map((src) => `<script src="${src}"></script>`).join("\n")}
 <script src="${GSAP_CDN}"></script>
 <script src="${SCROLLTRIGGER_CDN}"></script>
 <script>${js}</script>
@@ -412,6 +414,235 @@ const ASMR_INIT_JS = `
 })();
 `;
 
+/** Fixed full-page 3D canvas — shared by every lunar-themed render (the standalone Lunar template and the case-study layout when it opts into the Lunar background). */
+const LUNAR_CSS = `
+:root{color-scheme:dark}
+body{margin:0;font-family:-apple-system,'Segoe UI',sans-serif;background:#000;color:#fff;}
+#lunar-canvas{position:fixed;inset:0;z-index:-10;display:block;width:100%;height:100%;}
+`;
+
+const LUNAR_MARKUP = `<canvas id="lunar-canvas"></canvas>`;
+
+const LUNAR_MOON_TEXTURE_URL =
+  "https://cdn.21st.dev/assets/mirror/fc/fcb0f1f5548e6e18d40063dd55c6aacd3daedf2407b181dab85b61e22bf9fe57.jpg";
+
+/**
+ * Vanilla-three.js port of LunarBackground (see components/ui/lunar-background.tsx
+ * and lunar-gravity-card.tsx) — a textured moon, a 60k-particle ring with the
+ * same custom vertex/fragment shader patch, and a 75-piece orbiting asteroid
+ * belt that pushes the ring's particles aside as it passes through them.
+ * react-three-fiber and drei are React bindings with no equivalent in a
+ * hand-rolled static HTML page, so this rebuilds the same scene directly on
+ * three.js (loaded from THREE_CDN) — kept in exact sync with the React
+ * version's constants/algorithms. One intentional simplification: drei's
+ * `<Environment preset="city">` (an auto-fetched HDRI reflection map) is
+ * skipped here in favor of plain directional/ambient lights, to avoid a
+ * second fragile external asset dependency in the published output; the
+ * moon and asteroids still read as correctly lit, just without the subtle
+ * environment reflections the in-app preview has.
+ */
+const LUNAR_INIT_JS = `
+(function(){
+  var canvas = document.getElementById('lunar-canvas');
+  var renderer = new THREE.WebGLRenderer({ canvas: canvas, antialias: true, alpha: true });
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  renderer.shadowMap.enabled = true;
+
+  var scene = new THREE.Scene();
+  var camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 1000);
+  camera.position.set(0, 4, 10);
+  camera.lookAt(0, 0, 0);
+
+  function resize() {
+    camera.aspect = window.innerWidth / window.innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(window.innerWidth, window.innerHeight);
+  }
+  resize();
+  window.addEventListener('resize', resize);
+
+  scene.add(new THREE.AmbientLight(0xffffff, 0.02));
+  var keyLight = new THREE.DirectionalLight(0xffffff, 1.5);
+  keyLight.position.set(8, 5, 5);
+  keyLight.castShadow = true;
+  keyLight.shadow.mapSize.set(2048, 2048);
+  scene.add(keyLight);
+  var rimLight = new THREE.DirectionalLight(0x4a90e2, 0.15);
+  rimLight.position.set(-5, -3, -5);
+  scene.add(rimLight);
+
+  var group = new THREE.Group();
+  group.rotation.x = Math.PI / 8;
+  scene.add(group);
+
+  var textureLoader = new THREE.TextureLoader();
+  var moonTexture = textureLoader.load('${LUNAR_MOON_TEXTURE_URL}');
+
+  var RADIUS = 2.0;
+  var moon = new THREE.Mesh(
+    new THREE.SphereGeometry(RADIUS, 64, 64),
+    new THREE.MeshStandardMaterial({ map: moonTexture, bumpMap: moonTexture, bumpScale: 0.02, roughness: 0.8, metalness: 0.1 })
+  );
+  moon.castShadow = true;
+  moon.receiveShadow = true;
+  group.add(moon);
+
+  var PARTICLE_COUNT = 60000;
+  var ringPositions = new Float32Array(PARTICLE_COUNT * 3);
+  var ringColors = new Float32Array(PARTICLE_COUNT * 3);
+  var ringRandoms = new Float32Array(PARTICLE_COUNT);
+  for (var i = 0; i < PARTICLE_COUNT; i++) {
+    var angle = Math.random() * Math.PI * 2;
+    var rDist = Math.pow(Math.random(), 1.5);
+    var radius = 2.2 + rDist * 2.2;
+    var thickness = 0.4 - (rDist * 0.2);
+    var ySpread = (Math.random() + Math.random() + Math.random() - 1.5);
+    var y = ySpread * thickness;
+    ringPositions[i * 3] = Math.cos(angle) * radius;
+    ringPositions[i * 3 + 1] = y;
+    ringPositions[i * 3 + 2] = Math.sin(angle) * radius;
+    var intensity = 1.0 - rDist;
+    var paletteType = Math.random();
+    var baseR, baseG, baseB;
+    if (paletteType < 0.80) { baseR = 0.25; baseG = 0.30; baseB = 0.35; }
+    else if (paletteType < 0.92) { baseR = 0.0; baseG = 0.6; baseB = 0.8; }
+    else { baseR = 0.6; baseG = 0.2; baseB = 0.8; }
+    baseR = Math.min(1.0, Math.max(0.0, baseR + (Math.random() - 0.5) * 0.1));
+    baseG = Math.min(1.0, Math.max(0.0, baseG + (Math.random() - 0.5) * 0.1));
+    baseB = Math.min(1.0, Math.max(0.0, baseB + (Math.random() - 0.5) * 0.1));
+    var sparkle = Math.random() > 0.95 ? 2.5 : 1.0;
+    ringColors[i * 3] = baseR * intensity * sparkle;
+    ringColors[i * 3 + 1] = baseG * intensity * sparkle;
+    ringColors[i * 3 + 2] = baseB * intensity * sparkle;
+    ringRandoms[i] = Math.random();
+  }
+
+  var ringGeometry = new THREE.BufferGeometry();
+  ringGeometry.setAttribute('position', new THREE.BufferAttribute(ringPositions, 3));
+  ringGeometry.setAttribute('color', new THREE.BufferAttribute(ringColors, 3));
+  ringGeometry.setAttribute('aRandom', new THREE.BufferAttribute(ringRandoms, 1));
+
+  var ringUniforms = { uAsteroids: { value: new Float32Array(75 * 4) }, time: { value: 0 } };
+  var ringMaterial = new THREE.PointsMaterial({
+    size: 0.008, vertexColors: true, transparent: true, opacity: 0.8,
+    sizeAttenuation: true, blending: THREE.AdditiveBlending, depthWrite: false
+  });
+  ringMaterial.onBeforeCompile = function(shader) {
+    shader.uniforms.uAsteroids = ringUniforms.uAsteroids;
+    shader.uniforms.time = ringUniforms.time;
+    shader.vertexShader = 'uniform vec4 uAsteroids[75];\\nuniform float time;\\nattribute float aRandom;\\n' + shader.vertexShader;
+    shader.vertexShader = shader.vertexShader.replace('#include <begin_vertex>', \`
+      vec3 transformed = vec3(position);
+      transformed.y += sin(atan(transformed.x, transformed.z) * 10.0 + time) * 0.05 * aRandom;
+      for(int i = 0; i < 75; i++) {
+        vec4 astData = uAsteroids[i];
+        vec3 delta = transformed - astData.xyz;
+        float dist = length(delta);
+        float rad = astData.w * 2.0 + 0.15;
+        if (dist < rad) {
+          float force = pow((rad - dist) / rad, 2.0);
+          transformed += normalize(delta) * force * 0.4;
+          transformed.y += force * 0.20 * (aRandom - 0.5);
+        }
+      }
+    \`);
+  };
+  var ring = new THREE.Points(ringGeometry, ringMaterial);
+  ring.rotation.set(-Math.PI / 2, 0, 0);
+  group.add(ring);
+
+  function generateAsteroids(count) {
+    var data = [];
+    for (var i = 0; i < count; i++) {
+      var baseRadius = 2.8 + Math.random() * 2.0;
+      var radialAmplitude = 0.5 + Math.random() * 1.5;
+      var radialSpeed = 0.15 + Math.random() * 0.25;
+      var phase = Math.random() * Math.PI * 2;
+      var angle = Math.random() * Math.PI * 2;
+      var zOffset = (Math.random() - 0.5) * 0.8;
+      var speed = (0.04 + Math.random() * 0.08) * (Math.random() > 0.5 ? 1 : -1);
+      var scale = 0.02 + Math.pow(Math.random(), 4) * 0.18;
+      data.push({
+        angle: angle, baseRadius: baseRadius, radialAmplitude: radialAmplitude, radialSpeed: radialSpeed,
+        phase: phase, zOffset: zOffset, speed: speed,
+        rx: Math.random() * Math.PI, ry: Math.random() * Math.PI, rz: Math.random() * Math.PI,
+        rsx: (Math.random() - 0.5) * 0.05, rsy: (Math.random() - 0.5) * 0.05, rsz: (Math.random() - 0.5) * 0.05,
+        scale: scale
+      });
+    }
+    data.sort(function(a, b) { return b.scale - a.scale; });
+    return data;
+  }
+
+  var ASTEROID_COUNT = 75;
+  var asteroidTexture = textureLoader.load('${LUNAR_MOON_TEXTURE_URL}');
+  var asteroids = generateAsteroids(ASTEROID_COUNT);
+  var asteroidMesh = new THREE.InstancedMesh(
+    new THREE.DodecahedronGeometry(1, 0),
+    new THREE.MeshStandardMaterial({ map: asteroidTexture, bumpMap: asteroidTexture, bumpScale: 0.08, color: 0xffffff, roughness: 0.7, metalness: 0.1 }),
+    ASTEROID_COUNT
+  );
+  asteroidMesh.castShadow = true;
+  asteroidMesh.receiveShadow = true;
+  group.add(asteroidMesh);
+
+  var massiveAsteroids = new Float32Array(ASTEROID_COUNT * 4);
+  var dummy = new THREE.Object3D();
+  var asteroidScale = 0;
+
+  var clock = { last: performance.now() / 1000 };
+  function tick() {
+    var now = performance.now() / 1000;
+    var delta = Math.min(0.1, now - clock.last);
+    clock.last = now;
+
+    group.rotation.y += delta * 0.05;
+    moon.rotation.y += delta * 0.05;
+    ring.rotation.y -= delta * 0.02;
+
+    ring.updateMatrix();
+    var invMat = new THREE.Matrix4().copy(ring.matrix).invert();
+    var localAsteroids = new Float32Array(ASTEROID_COUNT * 4);
+    var v = new THREE.Vector3();
+    for (var i = 0; i < ASTEROID_COUNT; i++) {
+      v.set(massiveAsteroids[i * 4], massiveAsteroids[i * 4 + 1], massiveAsteroids[i * 4 + 2]);
+      v.applyMatrix4(invMat);
+      localAsteroids[i * 4] = v.x;
+      localAsteroids[i * 4 + 1] = v.y;
+      localAsteroids[i * 4 + 2] = v.z;
+      localAsteroids[i * 4 + 3] = massiveAsteroids[i * 4 + 3];
+    }
+    ringUniforms.uAsteroids.value = localAsteroids;
+    ringUniforms.time.value = now;
+
+    asteroidScale += (1 - asteroidScale) * Math.min(1, delta * 2);
+    asteroids.forEach(function(ast, i) {
+      ast.angle += ast.speed * delta;
+      ast.phase += ast.radialSpeed * delta;
+      var currentRadius = ast.baseRadius + Math.sin(ast.phase) * ast.radialAmplitude;
+      if (currentRadius < 2.15) currentRadius = 2.15 + (2.15 - currentRadius) * 0.85;
+      var x = Math.cos(ast.angle) * currentRadius;
+      var y = Math.sin(ast.angle) * currentRadius;
+      massiveAsteroids[i * 4] = x;
+      massiveAsteroids[i * 4 + 1] = y;
+      massiveAsteroids[i * 4 + 2] = ast.zOffset;
+      massiveAsteroids[i * 4 + 3] = ast.scale;
+      ast.rx += ast.rsx; ast.ry += ast.rsy; ast.rz += ast.rsz;
+      dummy.position.set(x, y, ast.zOffset);
+      dummy.rotation.set(ast.rx, ast.ry, ast.rz);
+      dummy.scale.setScalar(ast.scale * asteroidScale);
+      dummy.updateMatrix();
+      asteroidMesh.setMatrixAt(i, dummy.matrix);
+    });
+    asteroidMesh.instanceMatrix.needsUpdate = true;
+
+    renderer.render(scene, camera);
+    requestAnimationFrame(tick);
+  }
+  tick();
+})();
+`;
+
 function renderSpace(project: Project, avatars: Avatar[], supabaseUrl: string): string {
   const css =
     ASMR_CSS +
@@ -541,45 +772,174 @@ document.querySelectorAll('.section').forEach(function(section){
   return documentWrap(project.title, css, body, js);
 }
 
-function renderCaseStudy(project: Project, avatars: Avatar[], supabaseUrl: string): string {
-  const sections = flattenCaseStudySections(project.caseStudyBinding?.slots ?? null);
-  const sectionAudio = project.caseStudyBinding?.sectionAudio;
-  // Case-study projects always render this layout regardless of
-  // selectedTemplateId (see renderStaticSite) — picking "space" there is
-  // still how they opt into the Space template's particle background rather
-  // than losing access to it entirely.
-  const isSpace = project.selectedTemplateId === "space";
-
-  // Same big-text, word-highlight-as-spoken treatment as renderEditorial —
-  // this template is the case-study data source with Editorial's visuals,
-  // with a dark/particle variant when isSpace.
+function renderLunar(project: Project, avatars: Avatar[], supabaseUrl: string): string {
   const css =
-    (isSpace ? ASMR_CSS : `:root{color-scheme:light}\nbody{margin:0;font-family:-apple-system,'Segoe UI',sans-serif;background:#fff;color:#171717;}`) +
+    LUNAR_CSS +
     `
-.header{${isSpace ? "position:relative;" : ""}padding:96px 32px 64px;}
-.header .kicker{font-size:.75rem;text-transform:uppercase;letter-spacing:${isSpace ? ".4em" : ".05em"};font-weight:${isSpace ? "300" : "400"};color:${isSpace ? "rgba(255,255,255,.3)" : "#a3a3a3"};}
-.header h1{margin:12px 0 0;max-width:760px;font-size:2.5rem;font-weight:500;line-height:1.2;}
+.header{position:relative;padding:96px 32px 64px;}
+.header .kicker{font-size:.75rem;font-weight:300;text-transform:uppercase;letter-spacing:.4em;color:rgba(103,232,249,.4);}
+.header h1{margin:16px 0 0;max-width:760px;font-size:2.5rem;font-weight:500;line-height:1.2;}
 @media(min-width:768px){.header h1{font-size:3rem;}}
-.section{${isSpace ? "position:relative;" : ""}min-height:100vh;display:flex;flex-direction:column;align-items:center;gap:40px;border-top:1px solid ${isSpace ? "rgba(255,255,255,.05)" : "#f0f0f0"};padding:80px 32px;box-sizing:border-box;}
+.section{position:relative;min-height:100vh;display:flex;flex-direction:column;align-items:center;gap:40px;border-top:1px solid rgba(34,211,238,.1);padding:80px 32px;box-sizing:border-box;}
 @media(min-width:768px){.section{flex-direction:row;gap:64px;padding:80px 64px;}}
 .section.reversed{flex-direction:column;}
 @media(min-width:768px){.section.reversed{flex-direction:row-reverse;}}
 .avatar-wrap{width:100%;flex-shrink:0;display:flex;justify-content:center;}
 @media(min-width:768px){.avatar-wrap{width:36%;}}
-.avatar-wrap img{width:280px;height:280px;object-fit:contain;${isSpace ? "filter:drop-shadow(0 0 60px rgba(180,220,255,.15));" : ""}}
+.avatar-wrap img{width:280px;height:280px;object-fit:contain;filter:drop-shadow(0 0 60px rgba(120,180,255,.2));}
 @media(min-width:768px){.avatar-wrap img{width:420px;height:420px;}}
-.copy{opacity:0;transform:translateY(24px);width:100%;display:flex;flex-direction:column;gap:24px;${
-      isSpace
-        ? "border-radius:16px;border:1px solid rgba(255,255,255,.05);background:rgba(255,255,255,.02);backdrop-filter:blur(4px);padding:32px;box-sizing:border-box;"
-        : ""
-    }}
+.copy{opacity:0;transform:translateY(24px);width:100%;display:flex;flex-direction:column;gap:24px;border-radius:16px;border:1px solid rgba(34,211,238,.1);background:rgba(255,255,255,.03);backdrop-filter:blur(4px);padding:32px;box-sizing:border-box;}
 @media(min-width:768px){.copy{width:64%;}}
-.eyebrow{font-size:.75rem;font-weight:500;text-transform:uppercase;letter-spacing:.05em;color:${isSpace ? "rgba(255,255,255,.3)" : "#a3a3a3"};}
+.eyebrow{font-size:.75rem;font-weight:500;text-transform:uppercase;letter-spacing:.05em;color:rgba(165,243,252,.5);}
 .copy h2{font-size:1.5rem;font-weight:500;margin:0;}
 @media(min-width:768px){.copy h2{font-size:1.75rem;}}
 .big-text{font-weight:500;line-height:1.15;letter-spacing:-0.01em;font-size:clamp(1.75rem, 4.6vw, 5rem);margin:0;}
-.word{color:${isSpace ? "rgba(255,255,255,.25)" : "#d4d4d4"};transition:color .15s;}
-.word.spoken{color:${isSpace ? "#fff" : "#171717"};}
+.word{color:rgba(255,255,255,.25);transition:color .15s;}
+.word.spoken{color:#fff;}
+audio{margin-top:8px;height:36px;max-width:360px;}
+`;
+
+  const sectionsHtml = project.chunks
+    .map((chunk, index) => {
+      const avatarImage = avatarImagePath(chunk, index, avatars);
+      const src = audioUrl(supabaseUrl, project.id, chunk);
+      const words = chunk.narrativeText.split(/\s+/).filter(Boolean);
+      const wordsHtml = words.map((w) => `<span class="word">${escapeHtml(w)} </span>`).join("");
+      return `
+<section class="section${index % 2 === 1 ? " reversed" : ""}">
+  <div class="avatar-wrap">${avatarImage ? `<img src="${avatarImage}" alt="" />` : ""}</div>
+  <div class="copy">
+    <span class="eyebrow">${String(index + 1).padStart(2, "0")} / ${String(project.chunks.length).padStart(2, "0")}</span>
+    <h2>${escapeHtml(chunk.title)}</h2>
+    <p class="big-text">${wordsHtml}</p>
+    ${src ? `<audio controls src="${src}"></audio>` : ""}
+  </div>
+</section>`;
+    })
+    .join("\n");
+
+  const body = `
+${LUNAR_MARKUP}
+<header class="header"><span class="kicker">Lunar</span><h1>${escapeHtml(project.title)}</h1></header>
+${sectionsHtml}
+`;
+
+  // Word-highlight scroll wiring (same mechanism as renderSpace/renderCaseStudy)
+  // plus the shared LUNAR_INIT_JS three.js scene — the fixed #lunar-canvas
+  // sits behind every section, not just a single hero screen.
+  const js = `
+gsap.registerPlugin(ScrollTrigger);
+var currentAudio = null;
+var currentHandler = null;
+
+function stopHighlightTracking() {
+  if (currentAudio && currentHandler) currentAudio.removeEventListener('timeupdate', currentHandler);
+  currentHandler = null;
+}
+
+function trackHighlight(audio, words) {
+  var weights = words.map(function(word) { return (word.textContent || '').trim().length + 3; });
+  var totalWeight = weights.reduce(function(sum, w) { return sum + w; }, 0);
+  var cumulativeWeights = [];
+  var running = 0;
+  weights.forEach(function(w) { running += w; cumulativeWeights.push(running); });
+
+  function onTimeUpdate() {
+    if (!audio.duration) return;
+    var targetWeight = (audio.currentTime / audio.duration) * totalWeight;
+    var activeIndex = cumulativeWeights.findIndex(function(w) { return w >= targetWeight; });
+    if (activeIndex === -1) activeIndex = words.length - 1;
+    words.forEach(function(word, i) { word.classList.toggle('spoken', i <= activeIndex); });
+  }
+  audio.addEventListener('timeupdate', onTimeUpdate);
+  currentHandler = onTimeUpdate;
+}
+
+function activateSection(section) {
+  var audio = section.querySelector('audio');
+  var words = Array.from(section.querySelectorAll('.word'));
+  if (currentAudio && currentAudio !== audio) currentAudio.pause();
+  stopHighlightTracking();
+  if (audio) {
+    audio.currentTime = 0;
+    audio.play().catch(function(){});
+    currentAudio = audio;
+    trackHighlight(audio, words);
+  }
+}
+
+document.querySelectorAll('.section').forEach(function(section){
+  var audio = section.querySelector('audio');
+  ScrollTrigger.create({
+    trigger: section, start: 'top center', end: 'bottom center',
+    onEnter: function(){ activateSection(section); },
+    onEnterBack: function(){ activateSection(section); },
+    onLeave: function(){ if (audio) audio.pause(); },
+    onLeaveBack: function(){ if (audio) audio.pause(); }
+  });
+  gsap.fromTo(section.querySelector('.copy'), {opacity:0, y:24}, {
+    opacity:1, y:0, duration:0.6, ease:'power2.out',
+    scrollTrigger:{trigger:section, start:'top 75%'}
+  });
+});
+` + LUNAR_INIT_JS;
+
+  return documentWrap(project.title, css, body, js, [THREE_CDN]);
+}
+
+type CaseStudyRenderTheme = "light" | "space" | "lunar";
+
+function renderCaseStudy(project: Project, avatars: Avatar[], supabaseUrl: string): string {
+  const sections = flattenCaseStudySections(project.caseStudyBinding?.slots ?? null);
+  const sectionAudio = project.caseStudyBinding?.sectionAudio;
+  // Case-study projects always render this layout regardless of
+  // selectedTemplateId (see renderStaticSite) — picking "space"/"lunar" there
+  // is still how they opt into those templates' backgrounds rather than
+  // losing access to them entirely.
+  const theme: CaseStudyRenderTheme =
+    project.selectedTemplateId === "space" || project.selectedTemplateId === "lunar" ? project.selectedTemplateId : "light";
+  const isDark = theme !== "light";
+  const kicker = theme === "space" ? "Space" : theme === "lunar" ? "Lunar" : "Case study";
+  const kickerColor = theme === "lunar" ? "rgba(103,232,249,.4)" : isDark ? "rgba(255,255,255,.3)" : "#a3a3a3";
+  const eyebrowColor = theme === "lunar" ? "rgba(165,243,252,.5)" : isDark ? "rgba(255,255,255,.3)" : "#a3a3a3";
+  const borderColor = theme === "lunar" ? "rgba(34,211,238,.1)" : isDark ? "rgba(255,255,255,.05)" : "#f0f0f0";
+  const avatarGlow = theme === "lunar" ? "rgba(120,180,255,.2)" : "rgba(180,220,255,.15)";
+  const copyBg = theme === "lunar" ? "rgba(255,255,255,.03)" : "rgba(255,255,255,.02)";
+
+  // Same big-text, word-highlight-as-spoken treatment as renderEditorial —
+  // this template is the case-study data source with Editorial's visuals,
+  // with a dark backdrop (particle field or 3D moon scene) when isDark.
+  const css =
+    (isDark
+      ? theme === "lunar"
+        ? LUNAR_CSS
+        : ASMR_CSS
+      : `:root{color-scheme:light}\nbody{margin:0;font-family:-apple-system,'Segoe UI',sans-serif;background:#fff;color:#171717;}`) +
+    `
+.header{${isDark ? "position:relative;" : ""}padding:96px 32px 64px;}
+.header .kicker{font-size:.75rem;text-transform:uppercase;letter-spacing:${isDark ? ".4em" : ".05em"};font-weight:${isDark ? "300" : "400"};color:${kickerColor};}
+.header h1{margin:12px 0 0;max-width:760px;font-size:2.5rem;font-weight:500;line-height:1.2;}
+@media(min-width:768px){.header h1{font-size:3rem;}}
+.section{${isDark ? "position:relative;" : ""}min-height:100vh;display:flex;flex-direction:column;align-items:center;gap:40px;border-top:1px solid ${borderColor};padding:80px 32px;box-sizing:border-box;}
+@media(min-width:768px){.section{flex-direction:row;gap:64px;padding:80px 64px;}}
+.section.reversed{flex-direction:column;}
+@media(min-width:768px){.section.reversed{flex-direction:row-reverse;}}
+.avatar-wrap{width:100%;flex-shrink:0;display:flex;justify-content:center;}
+@media(min-width:768px){.avatar-wrap{width:36%;}}
+.avatar-wrap img{width:280px;height:280px;object-fit:contain;${isDark ? `filter:drop-shadow(0 0 60px ${avatarGlow});` : ""}}
+@media(min-width:768px){.avatar-wrap img{width:420px;height:420px;}}
+.copy{opacity:0;transform:translateY(24px);width:100%;display:flex;flex-direction:column;gap:24px;${
+      isDark
+        ? `border-radius:16px;border:1px solid ${borderColor};background:${copyBg};backdrop-filter:blur(4px);padding:32px;box-sizing:border-box;`
+        : ""
+    }}
+@media(min-width:768px){.copy{width:64%;}}
+.eyebrow{font-size:.75rem;font-weight:500;text-transform:uppercase;letter-spacing:.05em;color:${eyebrowColor};}
+.copy h2{font-size:1.5rem;font-weight:500;margin:0;}
+@media(min-width:768px){.copy h2{font-size:1.75rem;}}
+.big-text{font-weight:500;line-height:1.15;letter-spacing:-0.01em;font-size:clamp(1.75rem, 4.6vw, 5rem);margin:0;}
+.word{color:${isDark ? "rgba(255,255,255,.25)" : "#d4d4d4"};transition:color .15s;}
+.word.spoken{color:${isDark ? "#fff" : "#171717"};}
 audio{margin-top:8px;height:36px;max-width:360px;}
 `;
 
@@ -603,9 +963,11 @@ audio{margin-top:8px;height:36px;max-width:360px;}
     })
     .join("\n");
 
+  const backdropMarkup = theme === "space" ? ASMR_MARKUP : theme === "lunar" ? LUNAR_MARKUP : "";
+
   const body = `
-${isSpace ? ASMR_MARKUP : ""}
-<header class="header"><span class="kicker">${isSpace ? "Space" : "Case study"}</span><h1>${escapeHtml(project.title)}</h1></header>
+${backdropMarkup}
+<header class="header"><span class="kicker">${kicker}</span><h1>${escapeHtml(project.title)}</h1></header>
 ${sectionsHtml}
 `;
 
@@ -678,9 +1040,9 @@ document.querySelectorAll('.section').forEach(function(section){
     scrollTrigger:{trigger:section, start:'top 75%'}
   });
 });
-` + (isSpace ? ASMR_INIT_JS : "");
+` + (theme === "space" ? ASMR_INIT_JS : theme === "lunar" ? LUNAR_INIT_JS : "");
 
-  return documentWrap(project.title, css, body, js);
+  return documentWrap(project.title, css, body, js, theme === "lunar" ? [THREE_CDN] : []);
 }
 
 export function renderStaticSite(project: Project, avatars: Avatar[], supabaseUrl: string): string {
@@ -698,6 +1060,8 @@ export function renderStaticSite(project: Project, avatars: Avatar[], supabaseUr
       return renderCinematic(project, avatars, supabaseUrl);
     case "space":
       return renderSpace(project, avatars, supabaseUrl);
+    case "lunar":
+      return renderLunar(project, avatars, supabaseUrl);
     case "editorial":
     default:
       return renderEditorial(project, avatars, supabaseUrl);
