@@ -887,17 +887,321 @@ document.querySelectorAll('.section').forEach(function(section){
   return documentWrap(project.title, css, body, js, [THREE_CDN]);
 }
 
-type CaseStudyRenderTheme = "light" | "space" | "lunar";
+const AIRLOCK_VIDEO_CDN = "https://cdn.jsdelivr.net/gh/yuraoak/airlock-hero-assets@main";
+const AIRLOCK_VIDEO_SRC = `${AIRLOCK_VIDEO_CDN}/iss-hero-1080p.mp4`;
+const AIRLOCK_POSTER_SRC = `${AIRLOCK_VIDEO_CDN}/iss-hero-poster.jpg`;
+const AIRLOCK_SANS = "-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif";
+
+const AIRLOCK_CSS = `
+:root{color-scheme:dark}
+body{margin:0;font-family:-apple-system,'Segoe UI',sans-serif;background:#05070d;color:#f2f4f8;}
+#airlock-hero{position:relative;height:100dvh;width:100%;overflow:hidden;background:#05070d;}
+#airlock-video{position:absolute;inset:0;height:100%;width:100%;object-fit:cover;opacity:0;transform-origin:center center;will-change:transform;transition:opacity .6s ease;}
+.airlock-overlay{pointer-events:none;position:absolute;inset:0;}
+#airlock-title-wrap,#airlock-tagline-wrap{pointer-events:none;position:absolute;inset:0;display:flex;align-items:center;justify-content:center;text-align:center;}
+#airlock-title-wrap{padding:0 6%;}
+#airlock-tagline-wrap{padding:0 8%;opacity:0;}
+#airlock-title-wrap h1{display:inline-block;margin:0;font-weight:800;line-height:1;letter-spacing:-0.02em;font-family:${AIRLOCK_SANS};font-size:clamp(30px,7vw,96px);color:#f2f4f8;text-shadow:0 4px 30px rgba(0,0,0,.55);will-change:transform,filter,opacity;}
+#airlock-tagline-wrap p{margin:0;font-weight:700;letter-spacing:-0.01em;font-family:${AIRLOCK_SANS};font-size:clamp(20px,3.4vw,40px);line-height:1.2;color:#f2f4f8;text-shadow:0 4px 24px rgba(0,0,0,.6);}
+#airlock-hint{pointer-events:none;position:absolute;bottom:clamp(20px,6vh,48px);left:50%;transform:translateX(-50%);display:flex;flex-direction:column;align-items:center;gap:8px;transition:opacity .4s;color:rgba(242,244,248,.72);font-family:${AIRLOCK_SANS};font-size:clamp(10px,1.4vw,12px);font-weight:600;letter-spacing:.3em;}
+#airlock-hint svg{animation:airlock-bounce 1.6s ease-in-out infinite;}
+@keyframes airlock-bounce{0%,100%{transform:translateY(0);opacity:.5;}50%{transform:translateY(5px);opacity:1;}}
+@media(prefers-reduced-motion:reduce){#airlock-hint svg{animation:none!important;}}
+#airlock-skip{position:absolute;left:50%;top:16px;transform:translateX(-50%);z-index:10;border-radius:9999px;border:0;padding:8px 16px;font-size:12px;font-weight:600;font-family:${AIRLOCK_SANS};color:#f2f4f8;background:rgba(5,7,13,.7);letter-spacing:.08em;opacity:0;cursor:pointer;transition:opacity .15s;}
+#airlock-skip:focus-visible{opacity:1;outline:2px solid #f2f4f8;outline-offset:2px;}
+#airlock-progress-track{position:absolute;inset-inline:0;bottom:0;height:2px;background:rgba(255,255,255,.12);}
+#airlock-bar{height:100%;width:100%;transform-origin:left;background:linear-gradient(90deg, rgba(255,255,255,0.45), rgba(255,255,255,0.95));transform:scaleX(0);}
+.section{min-height:100vh;display:flex;flex-direction:column;align-items:center;gap:40px;border-top:1px solid rgba(255,255,255,.05);padding:80px 32px;box-sizing:border-box;}
+@media(min-width:768px){.section{flex-direction:row;gap:64px;padding:80px 64px;}}
+.section.reversed{flex-direction:column;}
+@media(min-width:768px){.section.reversed{flex-direction:row-reverse;}}
+.avatar-wrap{width:100%;flex-shrink:0;display:flex;justify-content:center;}
+@media(min-width:768px){.avatar-wrap{width:36%;}}
+.avatar-wrap img{width:280px;height:280px;object-fit:contain;filter:drop-shadow(0 0 60px rgba(255,255,255,.1));}
+@media(min-width:768px){.avatar-wrap img{width:420px;height:420px;}}
+.copy{opacity:0;transform:translateY(24px);width:100%;display:flex;flex-direction:column;gap:24px;border-radius:16px;border:1px solid rgba(255,255,255,.05);background:rgba(255,255,255,.02);backdrop-filter:blur(4px);padding:32px;box-sizing:border-box;}
+@media(min-width:768px){.copy{width:64%;}}
+.eyebrow{font-size:.75rem;font-weight:500;text-transform:uppercase;letter-spacing:.05em;color:rgba(255,255,255,.3);}
+.copy h2{font-size:1.5rem;font-weight:500;margin:0;}
+@media(min-width:768px){.copy h2{font-size:1.75rem;}}
+.big-text{font-weight:500;line-height:1.15;letter-spacing:-0.01em;font-size:clamp(1.75rem, 4.6vw, 5rem);margin:0;}
+.word{color:rgba(255,255,255,.25);transition:color .15s;}
+.word.spoken{color:#fff;}
+audio{margin-top:8px;height:36px;max-width:360px;}
+`;
+
+function airlockHeroMarkup(title: string): string {
+  return `
+<div id="airlock-hero">
+  <video id="airlock-video" src="${AIRLOCK_VIDEO_SRC}" poster="${AIRLOCK_POSTER_SRC}" muted playsinline preload="auto" aria-hidden="true"></video>
+  <div class="airlock-overlay" style="background:linear-gradient(180deg, rgba(5,7,13,0.38), rgba(5,7,13,0) 30%, rgba(5,7,13,0.15) 70%, rgba(5,7,13,0.58));"></div>
+  <div id="airlock-scrim" class="airlock-overlay" style="background:radial-gradient(ellipse 62% 44% at 50% 50%, rgba(5,7,13,0.68), rgba(5,7,13,0) 72%);"></div>
+  <div id="airlock-title-wrap"><h1>${escapeHtml(title)}</h1></div>
+  <div id="airlock-tagline-wrap"><p>Everything you know fits in one half of the frame.</p></div>
+  <div id="airlock-hint">
+    <span>SCROLL</span>
+    <svg width="14" height="18" viewBox="0 0 14 18" aria-hidden="true">
+      <path d="M7 1 L7 17 M2 12 L7 17 L12 12" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round" />
+    </svg>
+  </div>
+  <button id="airlock-skip" type="button">Skip intro</button>
+  <div id="airlock-progress-track"><div id="airlock-bar"></div></div>
+</div>`;
+}
+
+/**
+ * Vanilla-JS port of AirlockHero (see components/ui/airlock-spaceship-hero.tsx)
+ * — a scroll-locked, scrub-driven video hero. No React refs/state to adapt
+ * here beyond the obvious (getElementById instead of useRef, closured
+ * variables instead of useState): the original is already plain DOM/event
+ * code inside a useEffect, so this is a near-verbatim transcription. Kept in
+ * sync with the React version's constants and easing.
+ */
+const AIRLOCK_INIT_JS = `
+(function(){
+  var section = document.getElementById('airlock-hero');
+  var video = document.getElementById('airlock-video');
+  var titleWrap = document.getElementById('airlock-title-wrap');
+  var taglineWrap = document.getElementById('airlock-tagline-wrap');
+  var hint = document.getElementById('airlock-hint');
+  var bar = document.getElementById('airlock-bar');
+  var scrim = document.getElementById('airlock-scrim');
+  var skipBtn = document.getElementById('airlock-skip');
+  if (!video || !section) return;
+
+  var reduceMotion = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var duration = 0, rafId = 0, target = 0, shown = 0, moved = false, seeking = false, queued = null;
+  var locked = false, lockedY = 0, touchY = 0, released = false, lastY = 0;
+  var scrubDistance = 3200, holdDistance = 1100;
+  var totalDistance = scrubDistance + holdDistance;
+  var scrubShare = scrubDistance / totalDistance;
+
+  function clamp(v, min, max) { return Math.min(max, Math.max(min, v)); }
+
+  function seekTo(t) {
+    if (seeking) { queued = t; return; }
+    seeking = true;
+    video.currentTime = t;
+  }
+  video.addEventListener('seeked', function() {
+    seeking = false;
+    if (queued !== null) {
+      var t = queued;
+      queued = null;
+      seeking = true;
+      video.currentTime = t;
+    }
+  });
+
+  function paint(p) {
+    var videoP = clamp(p / scrubShare, 0, 1);
+    if (duration > 0) seekTo(Math.min(videoP * duration, duration - 0.04));
+    var titleAlpha = 1 - clamp(videoP / 0.35, 0, 1);
+    var taglineAlpha = clamp((videoP - 0.82) / 0.18, 0, 1);
+    video.style.transform = 'scale(' + (1 + videoP * 0.06) + ')';
+    if (scrim) scrim.style.opacity = String(Math.max(titleAlpha, taglineAlpha));
+    if (titleWrap) {
+      var h1 = titleWrap.querySelector('h1');
+      h1.style.opacity = String(titleAlpha);
+      h1.style.transform = 'translateY(' + ((1 - titleAlpha) * -24) + 'px) scale(' + (0.96 + titleAlpha * 0.04) + ')';
+      h1.style.filter = 'blur(' + ((1 - titleAlpha) * 10) + 'px)';
+    }
+    if (hint) hint.style.opacity = moved ? '0' : '1';
+    if (taglineWrap) {
+      var p_ = taglineWrap.querySelector('p');
+      taglineWrap.style.opacity = String(taglineAlpha);
+      p_.style.transform = 'translateY(' + ((1 - taglineAlpha) * 20) + 'px) scale(' + (0.97 + taglineAlpha * 0.03) + ')';
+      p_.style.filter = 'blur(' + ((1 - taglineAlpha) * 8) + 'px)';
+    }
+    if (bar) bar.style.transform = 'scaleX(' + p + ')';
+  }
+
+  function engageLock() {
+    if (locked) return;
+    locked = true;
+    released = false;
+    lockedY = window.scrollY;
+    var b = document.body.style;
+    b.position = 'fixed'; b.top = '-' + lockedY + 'px'; b.left = '0'; b.right = '0'; b.width = '100%';
+  }
+  function releaseLock() {
+    if (!locked) return;
+    locked = false;
+    var y = lockedY;
+    var b = document.body.style;
+    b.position = ''; b.top = ''; b.left = ''; b.right = ''; b.width = '';
+    window.scrollTo(0, y);
+    released = true;
+    lastY = y;
+  }
+
+  function release() {
+    target = shown = 1;
+    moved = true;
+    paint(1);
+    releaseLock();
+  }
+  if (skipBtn) skipBtn.addEventListener('click', release);
+
+  function consume(deltaY) {
+    if (!locked) return false;
+    if (target >= 1 && shown > 0.98 && deltaY > 0) { releaseLock(); return false; }
+    target = clamp(target + deltaY / totalDistance, 0, 1);
+    if (target > 0.001) moved = true;
+    return true;
+  }
+
+  function onWheel(e) { if (consume(e.deltaY)) e.preventDefault(); }
+  function onTouchStart(e) { touchY = (e.touches[0] || {}).clientY || 0; }
+  function onTouchMove(e) {
+    var y = (e.touches[0] || {}).clientY;
+    if (y === undefined) y = touchY;
+    var deltaY = touchY - y;
+    touchY = y;
+    if (consume(deltaY)) e.preventDefault();
+  }
+  var KEY_STEPS = { ArrowDown: 140, ArrowUp: -140, PageDown: 700, PageUp: -700, ' ': 700, End: Number.MAX_SAFE_INTEGER, Home: Number.MIN_SAFE_INTEGER };
+  function onKeyDown(e) {
+    var step = KEY_STEPS[e.key];
+    if (step === undefined) return;
+    if (consume(step)) e.preventDefault();
+  }
+  function onScroll() {
+    if (locked || !released) return;
+    var y = window.scrollY;
+    var climbing = y < lastY;
+    lastY = y;
+    if (climbing && y <= section.offsetTop) {
+      target = shown = 1;
+      paint(1);
+      engageLock();
+    }
+  }
+
+  video.addEventListener('loadeddata', function() {
+    duration = video.duration || 0;
+    video.style.opacity = '1';
+    if (reduceMotion) { target = shown = 1; moved = true; paint(1); }
+  });
+
+  if (!reduceMotion) {
+    if (window.scrollY <= section.offsetTop + 1) engageLock();
+    window.addEventListener('wheel', onWheel, { passive: false });
+    window.addEventListener('touchstart', onTouchStart, { passive: true });
+    window.addEventListener('touchmove', onTouchMove, { passive: false });
+    window.addEventListener('keydown', onKeyDown);
+    window.addEventListener('scroll', onScroll, { passive: true });
+    (function frame() {
+      shown += (target - shown) * 0.18;
+      paint(shown);
+      rafId = requestAnimationFrame(frame);
+    })();
+  }
+})();
+`;
+
+function renderAirlock(project: Project, avatars: Avatar[], supabaseUrl: string): string {
+  const css = AIRLOCK_CSS;
+
+  const sectionsHtml = project.chunks
+    .map((chunk, index) => {
+      const avatarImage = avatarImagePath(chunk, index, avatars);
+      const src = audioUrl(supabaseUrl, project.id, chunk);
+      const words = chunk.narrativeText.split(/\s+/).filter(Boolean);
+      const wordsHtml = words.map((w) => `<span class="word">${escapeHtml(w)} </span>`).join("");
+      return `
+<section class="section${index % 2 === 1 ? " reversed" : ""}">
+  <div class="avatar-wrap">${avatarImage ? `<img src="${avatarImage}" alt="" />` : ""}</div>
+  <div class="copy">
+    <span class="eyebrow">${String(index + 1).padStart(2, "0")} / ${String(project.chunks.length).padStart(2, "0")}</span>
+    <h2>${escapeHtml(chunk.title)}</h2>
+    <p class="big-text">${wordsHtml}</p>
+    ${src ? `<audio controls src="${src}"></audio>` : ""}
+  </div>
+</section>`;
+    })
+    .join("\n");
+
+  const body = `
+${airlockHeroMarkup(project.title)}
+${sectionsHtml}
+`;
+
+  const js = `
+gsap.registerPlugin(ScrollTrigger);
+var currentAudio = null;
+var currentHandler = null;
+
+function stopHighlightTracking() {
+  if (currentAudio && currentHandler) currentAudio.removeEventListener('timeupdate', currentHandler);
+  currentHandler = null;
+}
+
+function trackHighlight(audio, words) {
+  var weights = words.map(function(word) { return (word.textContent || '').trim().length + 3; });
+  var totalWeight = weights.reduce(function(sum, w) { return sum + w; }, 0);
+  var cumulativeWeights = [];
+  var running = 0;
+  weights.forEach(function(w) { running += w; cumulativeWeights.push(running); });
+
+  function onTimeUpdate() {
+    if (!audio.duration) return;
+    var targetWeight = (audio.currentTime / audio.duration) * totalWeight;
+    var activeIndex = cumulativeWeights.findIndex(function(w) { return w >= targetWeight; });
+    if (activeIndex === -1) activeIndex = words.length - 1;
+    words.forEach(function(word, i) { word.classList.toggle('spoken', i <= activeIndex); });
+  }
+  audio.addEventListener('timeupdate', onTimeUpdate);
+  currentHandler = onTimeUpdate;
+}
+
+function activateSection(section) {
+  var audio = section.querySelector('audio');
+  var words = Array.from(section.querySelectorAll('.word'));
+  if (currentAudio && currentAudio !== audio) currentAudio.pause();
+  stopHighlightTracking();
+  if (audio) {
+    audio.currentTime = 0;
+    audio.play().catch(function(){});
+    currentAudio = audio;
+    trackHighlight(audio, words);
+  }
+}
+
+document.querySelectorAll('.section').forEach(function(section){
+  var audio = section.querySelector('audio');
+  ScrollTrigger.create({
+    trigger: section, start: 'top center', end: 'bottom center',
+    onEnter: function(){ activateSection(section); },
+    onEnterBack: function(){ activateSection(section); },
+    onLeave: function(){ if (audio) audio.pause(); },
+    onLeaveBack: function(){ if (audio) audio.pause(); }
+  });
+  gsap.fromTo(section.querySelector('.copy'), {opacity:0, y:24}, {
+    opacity:1, y:0, duration:0.6, ease:'power2.out',
+    scrollTrigger:{trigger:section, start:'top 75%'}
+  });
+});
+` + AIRLOCK_INIT_JS;
+
+  return documentWrap(project.title, css, body, js);
+}
+
+type CaseStudyRenderTheme = "light" | "space" | "lunar" | "airlock";
 
 function renderCaseStudy(project: Project, avatars: Avatar[], supabaseUrl: string): string {
   const sections = flattenCaseStudySections(project.caseStudyBinding?.slots ?? null);
   const sectionAudio = project.caseStudyBinding?.sectionAudio;
   // Case-study projects always render this layout regardless of
-  // selectedTemplateId (see renderStaticSite) — picking "space"/"lunar" there
-  // is still how they opt into those templates' backgrounds rather than
-  // losing access to them entirely.
+  // selectedTemplateId (see renderStaticSite) — picking "space"/"lunar"/
+  // "airlock" there is still how they opt into those templates'
+  // backgrounds/heroes rather than losing access to them entirely.
   const theme: CaseStudyRenderTheme =
-    project.selectedTemplateId === "space" || project.selectedTemplateId === "lunar" ? project.selectedTemplateId : "light";
+    project.selectedTemplateId === "space" ||
+    project.selectedTemplateId === "lunar" ||
+    project.selectedTemplateId === "airlock"
+      ? project.selectedTemplateId
+      : "light";
   const isDark = theme !== "light";
   const kicker = theme === "space" ? "Space" : theme === "lunar" ? "Lunar" : "Case study";
   const kickerColor = theme === "lunar" ? "rgba(103,232,249,.4)" : isDark ? "rgba(255,255,255,.3)" : "#a3a3a3";
@@ -913,7 +1217,9 @@ function renderCaseStudy(project: Project, avatars: Avatar[], supabaseUrl: strin
     (isDark
       ? theme === "lunar"
         ? LUNAR_CSS
-        : ASMR_CSS
+        : theme === "airlock"
+          ? AIRLOCK_CSS
+          : ASMR_CSS
       : `:root{color-scheme:light}\nbody{margin:0;font-family:-apple-system,'Segoe UI',sans-serif;background:#fff;color:#171717;}`) +
     `
 .header{${isDark ? "position:relative;" : ""}padding:96px 32px 64px;}
@@ -964,10 +1270,16 @@ audio{margin-top:8px;height:36px;max-width:360px;}
     .join("\n");
 
   const backdropMarkup = theme === "space" ? ASMR_MARKUP : theme === "lunar" ? LUNAR_MARKUP : "";
+  // Airlock's hero replaces the plain header entirely (it already carries the
+  // title in its own full-screen intro) rather than sitting behind it like
+  // the Space/Lunar backdrops do — see CaseStudyTemplate.tsx's equivalent branch.
+  const headerOrHero =
+    theme === "airlock"
+      ? airlockHeroMarkup(project.title)
+      : `${backdropMarkup}\n<header class="header"><span class="kicker">${kicker}</span><h1>${escapeHtml(project.title)}</h1></header>`;
 
   const body = `
-${backdropMarkup}
-<header class="header"><span class="kicker">${kicker}</span><h1>${escapeHtml(project.title)}</h1></header>
+${headerOrHero}
 ${sectionsHtml}
 `;
 
@@ -1040,7 +1352,7 @@ document.querySelectorAll('.section').forEach(function(section){
     scrollTrigger:{trigger:section, start:'top 75%'}
   });
 });
-` + (theme === "space" ? ASMR_INIT_JS : theme === "lunar" ? LUNAR_INIT_JS : "");
+` + (theme === "space" ? ASMR_INIT_JS : theme === "lunar" ? LUNAR_INIT_JS : theme === "airlock" ? AIRLOCK_INIT_JS : "");
 
   return documentWrap(project.title, css, body, js, theme === "lunar" ? [THREE_CDN] : []);
 }
@@ -1062,6 +1374,8 @@ export function renderStaticSite(project: Project, avatars: Avatar[], supabaseUr
       return renderSpace(project, avatars, supabaseUrl);
     case "lunar":
       return renderLunar(project, avatars, supabaseUrl);
+    case "airlock":
+      return renderAirlock(project, avatars, supabaseUrl);
     case "editorial":
     default:
       return renderEditorial(project, avatars, supabaseUrl);

@@ -30,6 +30,11 @@ export const TEMPLATES: TemplateInfo[] = [
     name: "Lunar",
     description: "A real 3D moon orbited by a drifting asteroid belt sits behind every section. Cinematic, slow-turning, cool blue-cyan glass-panel copy.",
   },
+  {
+    id: "airlock",
+    name: "Airlock",
+    description: "Opens with a scroll-locked video hero — scrolling scrubs the footage forward and back until it finishes, then hands off into the narrated story below.",
+  },
 ];
 
 export function getTemplateById(id: string): TemplateInfo | undefined {

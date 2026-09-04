@@ -9,17 +9,18 @@ import type { CaseStudySection } from "@/lib/caseStudySections";
 import { avatarForIndex } from "./types";
 import { ASMRBackground } from "@/components/ui/asmr-background";
 import { LunarBackground } from "@/components/ui/lunar-background";
+import AirlockHero from "@/components/ui/airlock-spaceship-hero";
 
 if (typeof window !== "undefined") gsap.registerPlugin(ScrollTrigger);
 
-export type CaseStudyTheme = "light" | "space" | "lunar";
+export type CaseStudyTheme = "light" | "space" | "lunar" | "airlock";
 
 export interface CaseStudyTemplateProps {
   title: string;
   sections: CaseStudySection[];
   sectionAudio: Record<string, string>;
   avatars: Avatar[];
-  /** Renders the Space/Lunar template's backdrop + dark glass-panel copy instead of the plain white layout. */
+  /** Renders the Space/Lunar/Airlock template's backdrop or hero + dark glass-panel copy instead of the plain white layout. */
   theme?: CaseStudyTheme;
 }
 
@@ -36,6 +37,15 @@ const THEME_CONFIG: Record<CaseStudyTheme, { label: string | null; accent: strin
     accent: "text-cyan-200/50",
     border: "border-cyan-500/10",
     glow: "drop-shadow-[0_0_60px_rgba(120,180,255,0.2)]",
+  },
+  // No `label` kicker — AirlockHero already carries the title in its own
+  // full-screen intro, so the plain header block is skipped entirely for
+  // this theme (see the `theme === "airlock"` branch in the header render).
+  airlock: {
+    label: null,
+    accent: "text-white/30",
+    border: "border-white/5",
+    glow: "drop-shadow-[0_0_60px_rgba(255,255,255,0.1)]",
   },
 };
 
@@ -153,12 +163,16 @@ export default function CaseStudyTemplate({ title, sections, sectionAudio, avata
     <div ref={containerRef} className={isDark ? "relative text-white" : "bg-white text-neutral-900"}>
       {theme === "space" && <ASMRBackground />}
       {theme === "lunar" && <LunarBackground />}
-      <header className="relative px-10 pb-16 pt-24">
-        {label && <span className={`text-xs font-light uppercase tracking-[0.4em] ${accent}`}>{label}</span>}
-        <h1 className={`max-w-3xl text-4xl font-medium leading-tight md:text-5xl ${isDark ? "mt-4" : ""}`}>
-          {title}
-        </h1>
-      </header>
+      {theme === "airlock" ? (
+        <AirlockHero title={title} />
+      ) : (
+        <header className="relative px-10 pb-16 pt-24">
+          {label && <span className={`text-xs font-light uppercase tracking-[0.4em] ${accent}`}>{label}</span>}
+          <h1 className={`max-w-3xl text-4xl font-medium leading-tight md:text-5xl ${isDark ? "mt-4" : ""}`}>
+            {title}
+          </h1>
+        </header>
+      )}
 
       {sections.map((section, index) => {
         const avatar = avatarForIndex(index, avatars);
