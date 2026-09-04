@@ -36,6 +36,9 @@ yarn-error.log*
 # vercel
 .vercel
 
+# generated site output from local "publish" (see src/lib/publish/local.ts)
+/public/published/
+
 # typescript
 *.tsbuildinfo
 next-env.d.ts

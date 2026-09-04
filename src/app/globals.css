@@ -1,8 +1,17 @@
 @import "tailwindcss";
 
+/* Class-based dark mode (toggled by ThemeProvider) instead of Tailwind v4's
+   default OS-preference-based strategy — this is what lets the button work. */
+@custom-variant dark (&:where(.dark, .dark *));
+
 :root {
   --background: #ffffff;
   --foreground: #171717;
+}
+
+.dark {
+  --background: #0a0a0a;
+  --foreground: #ededed;
 }
 
 @theme inline {
@@ -12,15 +21,118 @@
   --font-mono: var(--font-geist-mono);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
-}
-
 body {
   background: var(--background);
   color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  font-family: var(--font-sans), ui-sans-serif, system-ui, sans-serif;
+}
+
+/* Slow diagonal drift for the space-theme starfield layer — nebula glow stays
+   still, only the star dots move, like a very slow parallax pan. */
+@keyframes drift-stars {
+  from {
+    background-position: 0 0, 0 0, 0 0, 0 0, 0 0, 0 0, 0 0, 0 0, 0 0, 0 0;
+  }
+  to {
+    background-position: 220px 220px, -260px 260px, 300px -300px, -240px 240px, 280px 280px,
+      -320px 320px, 260px -260px, -300px 300px, 240px 240px, -280px -280px;
+  }
+}
+
+.stars-layer {
+  animation: drift-stars 70s linear infinite;
+}
+
+/* Big soft glow orbs for the light theme — actual position drift (not just a
+   tiled background pan) so movement reads as obvious, not subliminal. */
+@keyframes float-orb-a {
+  0%, 100% { transform: translate(0, 0) scale(1); }
+  33% { transform: translate(60px, -40px) scale(1.08); }
+  66% { transform: translate(-30px, 30px) scale(0.95); }
+}
+
+@keyframes float-orb-b {
+  0%, 100% { transform: translate(0, 0) scale(1); }
+  40% { transform: translate(-70px, 40px) scale(1.1); }
+  75% { transform: translate(40px, -25px) scale(0.92); }
+}
+
+@keyframes float-orb-c {
+  0%, 100% { transform: translate(0, 0) scale(1); }
+  50% { transform: translate(50px, 55px) scale(1.12); }
+}
+
+.orb {
+  position: absolute;
+  border-radius: 9999px;
+  filter: blur(45px);
+}
+
+.orb-a {
+  animation: float-orb-a 16s ease-in-out infinite;
+}
+
+.orb-b {
+  animation: float-orb-b 20s ease-in-out infinite;
+}
+
+.orb-c {
+  animation: float-orb-c 24s ease-in-out infinite;
+}
+
+/* Unambiguous "this is the one to edit" cue for whichever chunk card the
+   scroll-linked focus effect (page.tsx) has scaled up to center — a glowing
+   ring plus an "Editing" badge, so there's a clear snap into an editable
+   state instead of a vague continuous fade the user can't read a moment for. */
+.chunk-card {
+  will-change: transform, opacity;
+}
+
+.chunk-card::before {
+  /* Sits just inside the card's own top edge (not poking out above the
+     border) so it can never be clipped by the scroll pane's overflow. */
+  content: "Editing";
+  position: absolute;
+  top: 14px;
+  left: 50%;
+  transform: translateX(-50%) translateY(-6px);
+  background: linear-gradient(90deg, #8b5cf6, #22d3ee);
+  color: #0a0a0a;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  padding: 5px 16px;
+  border-radius: 9999px;
+  box-shadow: 0 0 16px rgba(139, 92, 246, 0.5);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 150ms ease-out, transform 150ms ease-out;
+}
+
+.chunk-card.chunk-card--active {
+  box-shadow: 0 0 0 3px rgba(139, 92, 246, 0.85), 0 0 60px rgba(139, 92, 246, 0.35);
+}
+
+.chunk-card.chunk-card--active::before {
+  opacity: 1;
+  transform: translateX(-50%) translateY(0);
+}
+
+/* Indeterminate loading bar (story generation / regeneration / layout
+   binding) — a single-shot Gemini call has no natural sub-steps to report,
+   so this is an animated "something is happening" sweep rather than a real
+   percentage. See LoadingBar.tsx; the determinate variant (audio generation,
+   which genuinely has N discrete chunks) just sets width directly instead. */
+@keyframes loading-bar-sweep {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(350%);
+  }
+}
+
+.loading-bar-indeterminate-fill {
+  animation: loading-bar-sweep 1.1s ease-in-out infinite;
 }
