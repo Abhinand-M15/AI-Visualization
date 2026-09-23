@@ -59,12 +59,18 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
 
     // Upload every emotion pose for each selected avatar — small files, and simpler
     // than computing exactly which emotions this story's chunks actually use.
+    // The GLB model (when the avatar has one) rides along the same way, so the
+    // published bundle's AVATAR3D_INIT_JS script can fetch it client-side.
     const avatarImagePaths = Array.from(
       new Set(selectedAvatars.flatMap((avatar) => Object.values(avatar.emotions)))
     );
+    const avatarModelPaths = Array.from(
+      new Set(selectedAvatars.map((avatar) => avatar.modelUrl).filter((url): url is string => Boolean(url)))
+    );
+    const avatarVideoPaths = Array.from(new Set(selectedAvatars.flatMap((avatar) => avatar.videoUrls ?? [])));
     const avatarDeployFiles: DeployFile[] = await Promise.all(
-      avatarImagePaths.map(async (imageUrl) => {
-        const relativePath = imageUrl.replace(/^\//, "");
+      [...avatarImagePaths, ...avatarModelPaths, ...avatarVideoPaths].map(async (assetUrl) => {
+        const relativePath = assetUrl.replace(/^\//, "");
         const fileBuffer = await readFile(path.join(process.cwd(), "public", relativePath));
         return { file: relativePath, data: fileBuffer.toString("base64"), encoding: "base64" as const };
       })

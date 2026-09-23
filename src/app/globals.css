@@ -43,6 +43,74 @@ body {
   animation: drift-stars 70s linear infinite;
 }
 
+/* Shooting stars — each element supplies its own angle/duration/delay via CSS
+   custom properties (set inline per-element in SpaceBackdrop.tsx) so one
+   keyframe set covers every meteor at a different position/timing without
+   needing per-element <style> blocks. translateX moves along the already-
+   rotated local axis, so the streak travels in a straight diagonal line. */
+@keyframes meteor-fall {
+  0% {
+    transform: rotate(var(--meteor-angle, -35deg)) translateX(0);
+    opacity: 0;
+  }
+  4% {
+    opacity: 1;
+  }
+  14% {
+    opacity: 0;
+  }
+  100% {
+    transform: rotate(var(--meteor-angle, -35deg)) translateX(-640px);
+    opacity: 0;
+  }
+}
+
+.meteor {
+  position: absolute;
+  height: 1.5px;
+  width: 140px;
+  border-radius: 999px;
+  animation-name: meteor-fall;
+  animation-timing-function: linear;
+  animation-iteration-count: infinite;
+  animation-duration: var(--meteor-duration, 14s);
+  animation-delay: var(--meteor-delay, 0s);
+}
+
+/* Rocks that cross the entire viewport in a straight line, one edge to the
+   far edge (start position + travel distance are set per-asteroid via
+   --asteroid-dx/dy in SpaceBackdrop.tsx, sized in vw/vh so the crossing is
+   always full-screen regardless of viewport size). Opacity stays at 0 while
+   the rock is still off-screen at either end, and only ramps up/down right
+   at the edges — so it's fully visible ("keeps glowing") for the entire time
+   it's actually inside the viewport, and only fades while entering/exiting. */
+@keyframes asteroid-drift {
+  0% {
+    transform: translate(0, 0) rotate(0deg);
+    opacity: 0;
+  }
+  8% {
+    opacity: 1;
+  }
+  92% {
+    opacity: 1;
+  }
+  100% {
+    transform: translate(var(--asteroid-dx, 120vw), var(--asteroid-dy, 20vh)) rotate(var(--asteroid-spin, 200deg));
+    opacity: 0;
+  }
+}
+
+.asteroid {
+  position: absolute;
+  border-radius: 42% 58% 55% 45% / 45% 40% 60% 55%;
+  animation-name: asteroid-drift;
+  animation-timing-function: linear;
+  animation-iteration-count: infinite;
+  animation-duration: var(--asteroid-duration, 60s);
+  animation-delay: var(--asteroid-delay, 0s);
+}
+
 /* Big soft glow orbs for the light theme — actual position drift (not just a
    tiled background pan) so movement reads as obvious, not subliminal. */
 @keyframes float-orb-a {

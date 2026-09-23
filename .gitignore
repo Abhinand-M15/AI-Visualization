@@ -39,6 +39,12 @@ yarn-error.log*
 # generated site output from local "publish" (see src/lib/publish/local.ts)
 /public/published/
 
+# local dev-server output redirected to files when started in the background
+.dev-out.log
+.dev-err.log
+nextdev_stdout.log
+nextdev_stderr.log
+
 # typescript
 *.tsbuildinfo
 next-env.d.ts

@@ -8,23 +8,38 @@ const RADIUS = 2.0;
 export const RealisticMoon = ({ onClick }: { onClick?: () => void }) => {
   const meshRef = useRef<THREE.Mesh>(null);
   const colorMap = useTexture("https://cdn.21st.dev/assets/mirror/fc/fcb0f1f5548e6e18d40063dd55c6aacd3daedf2407b181dab85b61e22bf9fe57.jpg");
+  // 0 = idle, 1 = hovered — a mutable ref (not React state) since useFrame
+  // reads it every tick; a plain scale bump is a cheap, honest "this thing
+  // reacts to you" signal that doesn't require restyling the whole scene.
+  const hoverRef = useRef(0);
   useFrame((_, delta) => {
-    if (meshRef.current) meshRef.current.rotation.y += delta * 0.05;
+    if (!meshRef.current) return;
+    meshRef.current.rotation.y += delta * 0.05;
+    const targetScale = 1 + hoverRef.current * 0.06;
+    meshRef.current.scale.setScalar(
+      THREE.MathUtils.damp(meshRef.current.scale.x, targetScale, 6, delta)
+    );
   });
   return (
-    <mesh 
-      ref={meshRef} 
-      castShadow 
-      receiveShadow 
+    <mesh
+      ref={meshRef}
+      castShadow
+      receiveShadow
       onClick={onClick}
-      onPointerOver={() => document.body.style.cursor = 'pointer'} 
-      onPointerOut={() => document.body.style.cursor = 'auto'}
+      onPointerOver={() => {
+        hoverRef.current = 1;
+        document.body.style.cursor = "grab";
+      }}
+      onPointerOut={() => {
+        hoverRef.current = 0;
+        document.body.style.cursor = "auto";
+      }}
    >
       <sphereGeometry args={[RADIUS, 64, 64]} />
-      <meshStandardMaterial 
-        map={colorMap} 
-        bumpMap={colorMap} 
-        bumpScale={0.02} 
+      <meshStandardMaterial
+        map={colorMap}
+        bumpMap={colorMap}
+        bumpScale={0.02}
         roughness={0.8}
         metalness={0.1}
       />

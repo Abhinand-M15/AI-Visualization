@@ -79,6 +79,7 @@ export default function PreviewPage({ params }: { params: Promise<{ id: string }
           title={project.title}
           sections={caseStudySections}
           sectionAudio={project.caseStudyBinding?.sectionAudio ?? {}}
+          sectionVideo={project.caseStudyBinding?.sectionVideo}
           avatars={avatars}
           theme={
             project.selectedTemplateId === "space" ||

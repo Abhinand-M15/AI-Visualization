@@ -5,6 +5,25 @@ import { flattenCaseStudySections, type CaseStudySection } from "@/lib/caseStudy
 const GSAP_CDN = "https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.5/gsap.min.js";
 const SCROLLTRIGGER_CDN = "https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.5/ScrollTrigger.min.js";
 const THREE_CDN = "https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js";
+// Classic non-module build matching r128 above — attaches THREE.OrbitControls
+// as a global once loaded after THREE_CDN. Later three.js versions dropped
+// this non-module form in favor of ES modules, which a hand-rolled <script
+// src> page like this one can't consume, so the version is pinned deliberately.
+const ORBIT_CONTROLS_CDN = "https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js";
+// Matching non-module GLTFLoader build for the avatar 3D model (see below) —
+// pinned to the same r128 release as THREE_CDN/ORBIT_CONTROLS_CDN.
+const GLTF_LOADER_CDN = "https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/GLTFLoader.js";
+const AVATAR_MODEL_CDN_SCRIPTS = [THREE_CDN, ORBIT_CONTROLS_CDN, GLTF_LOADER_CDN];
+
+function needsAvatarModel(avatars: Avatar[]): boolean {
+  return avatars.some((avatar) => Boolean(avatar.modelUrl));
+}
+
+/** Some templates (Lunar) already need THREE_CDN/ORBIT_CONTROLS_CDN for their
+ *  own background scene — avoid loading the same CDN script twice. */
+function dedupeScripts(urls: string[]): string[] {
+  return Array.from(new Set(urls));
+}
 
 function escapeHtml(input: string): string {
   return input
@@ -46,6 +65,251 @@ function avatarImagePath(chunk: Chunk, index: number, avatars: Avatar[]): string
   return bundlePath(getAvatarImage(avatar, chunk.emotion));
 }
 
+/** Renders the avatar slot markup: a plain `<img>` fallback always present,
+ *  plus a `data-model` attribute the shared AVATAR3D_INIT_JS script picks up
+ *  to swap in a live, rotatable 3D canvas when the avatar has a `modelUrl`
+ *  and the visitor's browser can actually run WebGL. */
+function avatarBoxHtml(avatarImage: string | null, avatar: Avatar | undefined): string {
+  if (!avatarImage) return "";
+  const modelAttr = avatar?.modelUrl ? ` data-model="${bundlePath(avatar.modelUrl)}"` : "";
+  return `<div class="avatar-box"${modelAttr}><img src="${avatarImage}" alt="" /></div>`;
+}
+
+/** Video-mode avatar slot — a template-level choice (only Lunar asks for
+ *  this), not a fallback: no `<img>` alongside it, matching the live
+ *  preview's rule of never showing the static photo when a 3D model or
+ *  video is available. Muted/looping/no-autoplay — the enclosing
+ *  template's own scroll-activation JS calls play()/pause() on it exactly
+ *  like it already does for narration audio (see activateSection). */
+function avatarVideoBoxHtml(videoUrl: string | undefined): string {
+  if (!videoUrl) return "";
+  return `<div class="avatar-box"><video src="${bundlePath(videoUrl)}" muted loop playsinline preload="metadata"></video></div>`;
+}
+
+function avatarVideoPath(index: number, avatar: Avatar | undefined): string | undefined {
+  if (!avatar?.videoUrls || avatar.videoUrls.length === 0) return undefined;
+  return avatar.videoUrls[index % avatar.videoUrls.length];
+}
+
+/** Wav2Lip-rendered per-section video, baked in at publish time as the real
+ *  Supabase public URL (same treatment as sectionAudioUrl above), falling
+ *  back to the avatar's default looping clip when that section hasn't been
+ *  generated yet — never to the static photo, same fallback semantics as
+ *  the live preview (see CaseStudyTemplate.tsx). */
+function sectionVideoPath(
+  supabaseUrl: string,
+  projectId: string,
+  section: CaseStudySection,
+  index: number,
+  avatar: Avatar | undefined,
+  sectionVideo: Record<string, string> | undefined
+): string | undefined {
+  if (sectionVideo?.[section.key]) {
+    return `${supabaseUrl}/storage/v1/object/public/chunk-video/${projectId}/case-study-${section.key}.mp4`;
+  }
+  return avatarVideoPath(index, avatar);
+}
+
+/** Shared sizing/positioning rules for the avatar slot — each template still
+ *  sets `.avatar-box`'s (or `.avatar-badge .avatar-box`'s) width/height/filter
+ *  itself, matching whatever the old `.avatar-wrap img` rule used to size. */
+const AVATAR_BOX_CSS = `
+.avatar-box{position:relative;}
+.avatar-box img,.avatar-box canvas,.avatar-box video{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;}
+.avatar-box canvas{display:none;touch-action:pan-y;cursor:grab;}
+.avatar-box.dragging canvas{cursor:grabbing;}
+`;
+
+/**
+ * Vanilla-three.js port of components/ui/avatar-3d.tsx for the published
+ * static site — no react-three-fiber/drei here, so this hand-rolls the same
+ * behavior: lazy-mount only near the viewport, at most one live WebGL
+ * context at a time (guards the same GPU-constrained/sandboxed-browser
+ * failure the React version was hardened against), a disabled-GPU probe
+ * that leaves the fallback `<img>` in place instead of ever mounting a
+ * canvas that would just stay blank, damped drag-to-rotate, and a gentle
+ * hover scale bump. The GLTF is fetched once and cloned per instance,
+ * exactly like the React `Model` component does.
+ */
+const AVATAR3D_INIT_JS = `
+(function(){
+  function hasWebGLSupport() {
+    try {
+      var canvas = document.createElement('canvas');
+      var gl = canvas.getContext('webgl2') || canvas.getContext('webgl') || canvas.getContext('experimental-webgl');
+      if (!gl) return false;
+      var dbg = gl.getExtension('WEBGL_debug_renderer_info');
+      if (dbg) {
+        var vendor = gl.getParameter(dbg.UNMASKED_VENDOR_WEBGL);
+        var renderer = gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL);
+        if (typeof vendor === 'string' && /disabled/i.test(vendor)) return false;
+        if (typeof renderer === 'string' && /disabled/i.test(renderer)) return false;
+      }
+      return true;
+    } catch (e) { return false; }
+  }
+
+  if (typeof THREE === 'undefined' || !THREE.GLTFLoader || !hasWebGLSupport()) return;
+
+  var boxes = Array.prototype.slice.call(document.querySelectorAll('.avatar-box[data-model]'));
+  if (boxes.length === 0) return;
+
+  var gltfCache = {};
+  var loader = new THREE.GLTFLoader();
+  function loadModel(url) {
+    if (!gltfCache[url]) {
+      gltfCache[url] = new Promise(function(resolve, reject) {
+        loader.load(url, function(gltf) { resolve(gltf.scene); }, undefined, reject);
+      });
+    }
+    return gltfCache[url];
+  }
+
+  var activeSlot = null;
+
+  function setupBox(box) {
+    var url = box.getAttribute('data-model');
+    var img = box.querySelector('img');
+    var canvas = null, renderer = null, scene = null, camera = null, controls = null, modelGroup = null;
+    var hovered = false, rafId = 0, resizeObs = null, mounted = false, cancelled = false;
+
+    function frameCamera(object) {
+      var box3 = new THREE.Box3().setFromObject(object);
+      var size = new THREE.Vector3();
+      box3.getSize(size);
+      var center = new THREE.Vector3();
+      box3.getCenter(center);
+      object.position.sub(center);
+      var diag = size.length() || 1;
+      var margin = 1.05;
+      var fitDistance = (diag * margin) / (2 * Math.tan((camera.fov * Math.PI) / 360));
+      camera.position.set(0, 0, fitDistance);
+      camera.near = fitDistance / 100;
+      camera.far = fitDistance * 100;
+      camera.updateProjectionMatrix();
+      controls.target.set(0, 0, 0);
+      controls.update();
+    }
+
+    function resize() {
+      if (!renderer) return;
+      var rect = box.getBoundingClientRect();
+      var w = Math.max(1, rect.width), h = Math.max(1, rect.height);
+      renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+      renderer.setSize(w, h, false);
+      camera.aspect = w / h;
+      camera.updateProjectionMatrix();
+    }
+
+    function mount() {
+      if (mounted) return;
+      mounted = true;
+      cancelled = false;
+
+      canvas = document.createElement('canvas');
+      box.appendChild(canvas);
+
+      renderer = new THREE.WebGLRenderer({ canvas: canvas, alpha: true, antialias: true, powerPreference: 'high-performance' });
+      renderer.domElement.addEventListener('webglcontextlost', function(e) { e.preventDefault(); });
+
+      scene = new THREE.Scene();
+      camera = new THREE.PerspectiveCamera(32, 1, 0.1, 100);
+      camera.position.set(0, 0, 5);
+
+      scene.add(new THREE.AmbientLight(0xffffff, 0.9));
+      var key = new THREE.DirectionalLight(0xffffff, 1.6);
+      key.position.set(3, 5, 4);
+      scene.add(key);
+      var fill = new THREE.DirectionalLight(0xffffff, 0.5);
+      fill.position.set(-4, 2, -3);
+      scene.add(fill);
+
+      controls = new THREE.OrbitControls(camera, renderer.domElement);
+      controls.enableZoom = false;
+      controls.enablePan = false;
+      controls.enableRotate = true;
+      controls.enableDamping = true;
+      controls.dampingFactor = 0.12;
+      controls.addEventListener('start', function() { box.classList.add('dragging'); });
+      controls.addEventListener('end', function() { box.classList.remove('dragging'); });
+
+      modelGroup = new THREE.Group();
+      scene.add(modelGroup);
+
+      resize();
+      resizeObs = new ResizeObserver(resize);
+      resizeObs.observe(box);
+      // A ResizeObserver's first callback can land a beat late in some
+      // browsers — this guarantees the canvas is never stuck at a stale size.
+      setTimeout(resize, 50);
+
+      box.addEventListener('pointerenter', function() { hovered = true; });
+      box.addEventListener('pointerleave', function() { hovered = false; });
+
+      loadModel(url).then(function(sourceScene) {
+        if (cancelled) return;
+        var cloned = sourceScene.clone();
+        modelGroup.add(cloned);
+        frameCamera(cloned);
+        img.style.display = 'none';
+        canvas.style.display = 'block';
+      }).catch(function() {
+        unmount();
+      });
+
+      var clock = performance.now() / 1000;
+      function tick() {
+        var now = performance.now() / 1000;
+        var delta = Math.min(0.1, now - clock);
+        clock = now;
+        var target = hovered ? 1.08 : 1;
+        modelGroup.scale.setScalar(modelGroup.scale.x + (target - modelGroup.scale.x) * Math.min(1, delta * 6));
+        controls.update();
+        renderer.render(scene, camera);
+        rafId = requestAnimationFrame(tick);
+      }
+      tick();
+    }
+
+    function unmount() {
+      if (!mounted) return;
+      mounted = false;
+      cancelled = true;
+      cancelAnimationFrame(rafId);
+      if (resizeObs) resizeObs.disconnect();
+      if (controls) controls.dispose();
+      if (renderer) renderer.dispose();
+      if (canvas && canvas.parentElement) canvas.parentElement.removeChild(canvas);
+      if (img) img.style.display = '';
+      canvas = null; renderer = null; scene = null; camera = null; controls = null; modelGroup = null;
+    }
+
+    var wantsSlot = false;
+    function tryAcquireSlot() {
+      if (!wantsSlot) return;
+      if (activeSlot === null || activeSlot === box) {
+        activeSlot = box;
+        mount();
+      } else {
+        setTimeout(tryAcquireSlot, 350);
+      }
+    }
+
+    new IntersectionObserver(function(entries) {
+      wantsSlot = entries[0].isIntersecting;
+      if (wantsSlot) {
+        tryAcquireSlot();
+      } else {
+        if (activeSlot === box) activeSlot = null;
+        unmount();
+      }
+    }, { rootMargin: '100px 0px', threshold: 0.01 }).observe(box);
+  }
+
+  boxes.forEach(setupBox);
+})();
+`;
+
 function documentWrap(title: string, css: string, body: string, js: string, extraScripts: string[] = []): string {
   return `<!doctype html>
 <html lang="en">
@@ -78,8 +342,8 @@ body{margin:0;font-family:-apple-system,'Segoe UI',sans-serif;background:#fff;co
 @media(min-width:768px){.section.reversed{flex-direction:row-reverse;}}
 .avatar-wrap{width:100%;flex-shrink:0;display:flex;justify-content:center;}
 @media(min-width:768px){.avatar-wrap{width:36%;}}
-.avatar-wrap img{width:280px;height:280px;object-fit:contain;}
-@media(min-width:768px){.avatar-wrap img{width:420px;height:420px;}}
+.avatar-wrap .avatar-box{width:280px;height:280px;}
+@media(min-width:768px){.avatar-wrap .avatar-box{width:420px;height:420px;}}
 .copy{opacity:0;transform:translateY(24px);width:100%;display:flex;flex-direction:column;gap:24px;}
 @media(min-width:768px){.copy{width:64%;}}
 .eyebrow{font-size:.75rem;text-transform:uppercase;letter-spacing:.05em;color:#a3a3a3;}
@@ -89,17 +353,18 @@ body{margin:0;font-family:-apple-system,'Segoe UI',sans-serif;background:#fff;co
 .word{color:#d4d4d4;transition:color .15s;}
 .word.spoken{color:#171717;}
 audio{margin-top:8px;height:36px;max-width:360px;}
-`;
+` + AVATAR_BOX_CSS;
 
   const sectionsHtml = project.chunks
     .map((chunk, index) => {
+      const avatar = avatarForIndex(index, avatars);
       const avatarImage = avatarImagePath(chunk, index, avatars);
       const src = audioUrl(supabaseUrl, project.id, chunk);
       const words = chunk.narrativeText.split(/\s+/).filter(Boolean);
       const wordsHtml = words.map((w) => `<span class="word">${escapeHtml(w)} </span>`).join("");
       return `
 <section class="section${index % 2 === 1 ? " reversed" : ""}">
-  <div class="avatar-wrap">${avatarImage ? `<img src="${avatarImage}" alt="" />` : ""}</div>
+  <div class="avatar-wrap">${avatarBoxHtml(avatarImage, avatar)}</div>
   <div class="copy">
     <span class="eyebrow">${String(index + 1).padStart(2, "0")} / ${String(project.chunks.length).padStart(2, "0")}</span>
     <h2>${escapeHtml(chunk.title)}</h2>
@@ -186,7 +451,14 @@ document.querySelectorAll('.section').forEach(function(section){
 });
 `;
 
-  return documentWrap(project.title, css, body, js);
+  const needsModel = needsAvatarModel(avatars);
+  return documentWrap(
+    project.title,
+    css,
+    body,
+    js + (needsModel ? AVATAR3D_INIT_JS : ""),
+    needsModel ? AVATAR_MODEL_CDN_SCRIPTS : []
+  );
 }
 
 function renderClarity(project: Project, avatars: Avatar[], supabaseUrl: string): string {
@@ -197,21 +469,22 @@ h1{font-size:1.875rem;font-weight:500;letter-spacing:-0.01em;margin:0;}
 .cards{display:flex;flex-direction:column;gap:20px;}
 .card{opacity:0;transform:translateY(16px);display:flex;gap:16px;border-radius:16px;border:1px solid #e5e5e5;background:#fff;padding:24px;box-shadow:0 1px 2px rgba(0,0,0,.04);box-sizing:border-box;}
 .avatar-badge{width:48px;height:48px;border-radius:9999px;background:#f5f5f5;display:flex;align-items:center;justify-content:center;flex-shrink:0;}
-.avatar-badge img{width:40px;height:40px;object-fit:contain;}
+.avatar-badge .avatar-box{width:40px;height:40px;}
 .card-body{display:flex;flex-direction:column;gap:8px;flex:1;}
 .chunk-label{font-size:.75rem;font-weight:500;color:#a3a3a3;}
 .card h2{font-size:1.125rem;font-weight:500;margin:0;}
 .card p{font-size:.9rem;line-height:1.7;color:#525252;margin:0;}
 audio{margin-top:4px;height:36px;}
-`;
+` + AVATAR_BOX_CSS;
 
   const cardsHtml = project.chunks
     .map((chunk, index) => {
+      const avatar = avatarForIndex(index, avatars);
       const avatarImage = avatarImagePath(chunk, index, avatars);
       const src = audioUrl(supabaseUrl, project.id, chunk);
       return `
 <article class="card">
-  ${avatarImage ? `<div class="avatar-badge"><img src="${avatarImage}" alt="" /></div>` : ""}
+  ${avatarImage ? `<div class="avatar-badge">${avatarBoxHtml(avatarImage, avatar)}</div>` : ""}
   <div class="card-body">
     <span class="chunk-label">Chunk ${chunk.order}</span>
     <h2>${escapeHtml(chunk.title)}</h2>
@@ -239,7 +512,14 @@ document.querySelectorAll('.card').forEach(function(card){
 });
 `;
 
-  return documentWrap(project.title, css, body, js);
+  const needsModel = needsAvatarModel(avatars);
+  return documentWrap(
+    project.title,
+    css,
+    body,
+    js + (needsModel ? AVATAR3D_INIT_JS : ""),
+    needsModel ? AVATAR_MODEL_CDN_SCRIPTS : []
+  );
 }
 
 function renderCinematic(project: Project, avatars: Avatar[], supabaseUrl: string): string {
@@ -251,23 +531,24 @@ body{margin:0;font-family:-apple-system,'Segoe UI',sans-serif;color:#fff;}
 .hero p{margin-top:16px;font-size:.8rem;text-transform:uppercase;letter-spacing:.15em;color:rgba(255,255,255,.5);}
 .cine-section{min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:24px;padding:0 24px;text-align:center;box-sizing:border-box;}
 .cine-content{opacity:0;transform:scale(0.94);display:flex;flex-direction:column;align-items:center;gap:24px;}
-.cine-content img{width:176px;height:176px;object-fit:contain;filter:drop-shadow(0 0 60px rgba(255,255,255,.15));}
+.cine-content .avatar-box{width:176px;height:176px;filter:drop-shadow(0 0 60px rgba(255,255,255,.15));}
 .cine-label{font-size:.75rem;text-transform:uppercase;letter-spacing:.15em;color:rgba(255,255,255,.4);}
 .cine-content h2{max-width:640px;font-size:1.5rem;font-weight:500;margin:0;}
 .cine-content p{max-width:560px;font-size:1.125rem;line-height:1.7;color:rgba(255,255,255,.7);margin:0;}
 .play-btn{border-radius:9999px;border:1px solid rgba(255,255,255,.2);background:transparent;color:#fff;padding:10px 20px;font-size:.9rem;font-weight:500;cursor:pointer;}
 .play-btn:hover{background:rgba(255,255,255,.1);}
-`;
+` + AVATAR_BOX_CSS;
 
   const sectionsHtml = project.chunks
     .map((chunk, index) => {
+      const avatar = avatarForIndex(index, avatars);
       const avatarImage = avatarImagePath(chunk, index, avatars);
       const bg = palette[(index + 1) % palette.length];
       const src = audioUrl(supabaseUrl, project.id, chunk);
       return `
 <section class="cine-section" style="background:${bg}">
   <div class="cine-content">
-    ${avatarImage ? `<img src="${avatarImage}" alt="" />` : ""}
+    ${avatarBoxHtml(avatarImage, avatar)}
     <span class="cine-label">Chunk ${chunk.order} of ${project.chunks.length}</span>
     <h2>${escapeHtml(chunk.title)}</h2>
     <p>${escapeHtml(chunk.narrativeText)}</p>
@@ -305,7 +586,14 @@ document.querySelectorAll('.play-btn').forEach(function(btn){
 });
 `;
 
-  return documentWrap(project.title, css, body, js);
+  const needsModel = needsAvatarModel(avatars);
+  return documentWrap(
+    project.title,
+    css,
+    body,
+    js + (needsModel ? AVATAR3D_INIT_JS : ""),
+    needsModel ? AVATAR_MODEL_CDN_SCRIPTS : []
+  );
 }
 
 /** Fixed full-page canvas + custom cursor dot — shared by every space-themed render (the standalone Space template and the case-study layout when it opts into the Space background). */
@@ -418,7 +706,8 @@ const ASMR_INIT_JS = `
 const LUNAR_CSS = `
 :root{color-scheme:dark}
 body{margin:0;font-family:-apple-system,'Segoe UI',sans-serif;background:#000;color:#fff;}
-#lunar-canvas{position:fixed;inset:0;z-index:-10;display:block;width:100%;height:100%;}
+#lunar-canvas{position:fixed;inset:0;z-index:-10;display:block;width:100%;height:100%;touch-action:pan-y;cursor:grab;}
+#lunar-canvas.dragging{cursor:grabbing;}
 `;
 
 const LUNAR_MARKUP = `<canvas id="lunar-canvas"></canvas>`;
@@ -447,11 +736,34 @@ const LUNAR_INIT_JS = `
   var renderer = new THREE.WebGLRenderer({ canvas: canvas, antialias: true, alpha: true });
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
   renderer.shadowMap.enabled = true;
+  // react-three-fiber's Canvas defaults to sRGB output + ACES filmic tone
+  // mapping; this r128 CDN build defaults to neither (linear output, no
+  // tone mapping), which is what actually made the published moon look
+  // flatter/greyer than the in-app preview — not the missing Environment
+  // HDRI mentioned above, which only adds subtle reflections. Matching the
+  // color pipeline here (not the scene/lighting/geometry) is what brings it
+  // back in line with the reference look.
+  renderer.outputEncoding = THREE.sRGBEncoding;
+  renderer.toneMapping = THREE.ACESFilmicToneMapping;
+  renderer.toneMappingExposure = 1;
 
   var scene = new THREE.Scene();
   var camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 1000);
   camera.position.set(0, 4, 10);
   camera.lookAt(0, 0, 0);
+
+  // Draggable (rotate only, matching the original card — no zoom/pan), mouse
+  // only: touches.ONE/TWO left null so a touch-drag on the page is never
+  // hijacked into orbiting the camera instead of scrolling.
+  var controls = new THREE.OrbitControls(camera, renderer.domElement);
+  controls.enableZoom = false;
+  controls.enablePan = false;
+  controls.enableRotate = true;
+  controls.enableDamping = true;
+  controls.dampingFactor = 0.08;
+  controls.touches = { ONE: null, TWO: null };
+  controls.addEventListener('start', function() { canvas.classList.add('dragging'); });
+  controls.addEventListener('end', function() { canvas.classList.remove('dragging'); });
 
   function resize() {
     camera.aspect = window.innerWidth / window.innerHeight;
@@ -486,6 +798,18 @@ const LUNAR_INIT_JS = `
   moon.castShadow = true;
   moon.receiveShadow = true;
   group.add(moon);
+
+  // Hover feedback: a subtle scale bump while the pointer is over the moon
+  // (matching RealisticMoon's React version — see lunar-gravity-card.tsx),
+  // detected via raycasting since a bare canvas has no built-in per-mesh
+  // pointer events the way react-three-fiber does.
+  var raycaster = new THREE.Raycaster();
+  var pointerNdc = new THREE.Vector2(-10, -10);
+  var moonHover = 0;
+  window.addEventListener('mousemove', function(e) {
+    pointerNdc.x = (e.clientX / window.innerWidth) * 2 - 1;
+    pointerNdc.y = -(e.clientY / window.innerHeight) * 2 + 1;
+  });
 
   var PARTICLE_COUNT = 60000;
   var ringPositions = new Float32Array(PARTICLE_COUNT * 3);
@@ -600,6 +924,11 @@ const LUNAR_INIT_JS = `
     moon.rotation.y += delta * 0.05;
     ring.rotation.y -= delta * 0.02;
 
+    raycaster.setFromCamera(pointerNdc, camera);
+    var hovered = raycaster.intersectObject(moon, false).length > 0;
+    moonHover += ((hovered ? 1 : 0) - moonHover) * Math.min(1, delta * 6);
+    moon.scale.setScalar(1 + moonHover * 0.06);
+
     ring.updateMatrix();
     var invMat = new THREE.Matrix4().copy(ring.matrix).invert();
     var localAsteroids = new Float32Array(ASTEROID_COUNT * 4);
@@ -636,6 +965,7 @@ const LUNAR_INIT_JS = `
     });
     asteroidMesh.instanceMatrix.needsUpdate = true;
 
+    controls.update();
     renderer.render(scene, camera);
     requestAnimationFrame(tick);
   }
@@ -657,28 +987,29 @@ function renderSpace(project: Project, avatars: Avatar[], supabaseUrl: string): 
 @media(min-width:768px){.section.reversed{flex-direction:row-reverse;}}
 .avatar-wrap{width:100%;flex-shrink:0;display:flex;justify-content:center;}
 @media(min-width:768px){.avatar-wrap{width:36%;}}
-.avatar-wrap img{width:280px;height:280px;object-fit:contain;filter:drop-shadow(0 0 60px rgba(180,220,255,.15));}
-@media(min-width:768px){.avatar-wrap img{width:420px;height:420px;}}
-.copy{opacity:0;transform:translateY(24px);width:100%;display:flex;flex-direction:column;gap:24px;border-radius:16px;border:1px solid rgba(255,255,255,.05);background:rgba(255,255,255,.02);backdrop-filter:blur(4px);padding:32px;box-sizing:border-box;}
+.avatar-wrap .avatar-box{width:280px;height:280px;filter:drop-shadow(0 0 60px rgba(180,220,255,.15));}
+@media(min-width:768px){.avatar-wrap .avatar-box{width:420px;height:420px;}}
+.copy{opacity:0;transform:translateY(24px);width:100%;display:flex;flex-direction:column;gap:24px;border-radius:16px;border:1px solid rgba(255,255,255,.15);background:rgba(0,0,0,.4);box-shadow:0 8px 32px rgba(0,0,0,.35);padding:32px;box-sizing:border-box;}
 @media(min-width:768px){.copy{width:64%;}}
 .eyebrow{font-size:.75rem;font-weight:500;text-transform:uppercase;letter-spacing:.05em;color:rgba(255,255,255,.3);}
 .copy h2{font-size:1.5rem;font-weight:500;margin:0;}
 @media(min-width:768px){.copy h2{font-size:1.75rem;}}
-.big-text{font-weight:500;line-height:1.15;letter-spacing:-0.01em;font-size:clamp(1.75rem, 4.6vw, 5rem);margin:0;}
+.big-text{font-weight:500;line-height:1.15;letter-spacing:-0.01em;font-size:clamp(1.5rem, 3.2vw, 3rem);margin:0;}
 .word{color:rgba(255,255,255,.25);transition:color .15s;}
 .word.spoken{color:#fff;}
 audio{margin-top:8px;height:36px;max-width:360px;}
-`;
+` + AVATAR_BOX_CSS;
 
   const sectionsHtml = project.chunks
     .map((chunk, index) => {
+      const avatar = avatarForIndex(index, avatars);
       const avatarImage = avatarImagePath(chunk, index, avatars);
       const src = audioUrl(supabaseUrl, project.id, chunk);
       const words = chunk.narrativeText.split(/\s+/).filter(Boolean);
       const wordsHtml = words.map((w) => `<span class="word">${escapeHtml(w)} </span>`).join("");
       return `
 <section class="section${index % 2 === 1 ? " reversed" : ""}">
-  <div class="avatar-wrap">${avatarImage ? `<img src="${avatarImage}" alt="" />` : ""}</div>
+  <div class="avatar-wrap">${avatarBoxHtml(avatarImage, avatar)}</div>
   <div class="copy">
     <span class="eyebrow">${String(index + 1).padStart(2, "0")} / ${String(project.chunks.length).padStart(2, "0")}</span>
     <h2>${escapeHtml(chunk.title)}</h2>
@@ -769,7 +1100,14 @@ document.querySelectorAll('.section').forEach(function(section){
 });
 ` + ASMR_INIT_JS;
 
-  return documentWrap(project.title, css, body, js);
+  const needsModel = needsAvatarModel(avatars);
+  return documentWrap(
+    project.title,
+    css,
+    body,
+    js + (needsModel ? AVATAR3D_INIT_JS : ""),
+    needsModel ? AVATAR_MODEL_CDN_SCRIPTS : []
+  );
 }
 
 function renderLunar(project: Project, avatars: Avatar[], supabaseUrl: string): string {
@@ -786,28 +1124,33 @@ function renderLunar(project: Project, avatars: Avatar[], supabaseUrl: string): 
 @media(min-width:768px){.section.reversed{flex-direction:row-reverse;}}
 .avatar-wrap{width:100%;flex-shrink:0;display:flex;justify-content:center;}
 @media(min-width:768px){.avatar-wrap{width:36%;}}
-.avatar-wrap img{width:280px;height:280px;object-fit:contain;filter:drop-shadow(0 0 60px rgba(120,180,255,.2));}
-@media(min-width:768px){.avatar-wrap img{width:420px;height:420px;}}
-.copy{opacity:0;transform:translateY(24px);width:100%;display:flex;flex-direction:column;gap:24px;border-radius:16px;border:1px solid rgba(34,211,238,.1);background:rgba(255,255,255,.03);backdrop-filter:blur(4px);padding:32px;box-sizing:border-box;}
+.avatar-wrap .avatar-box{width:280px;height:280px;filter:drop-shadow(0 0 60px rgba(120,180,255,.2));}
+@media(min-width:768px){.avatar-wrap .avatar-box{width:420px;height:420px;}}
+.copy{opacity:0;transform:translateY(24px);width:100%;display:flex;flex-direction:column;gap:24px;border-radius:16px;border:1px solid rgba(103,232,249,.2);background:rgba(0,0,0,.4);box-shadow:0 8px 32px rgba(0,0,0,.35);padding:32px;box-sizing:border-box;}
 @media(min-width:768px){.copy{width:64%;}}
 .eyebrow{font-size:.75rem;font-weight:500;text-transform:uppercase;letter-spacing:.05em;color:rgba(165,243,252,.5);}
 .copy h2{font-size:1.5rem;font-weight:500;margin:0;}
 @media(min-width:768px){.copy h2{font-size:1.75rem;}}
-.big-text{font-weight:500;line-height:1.15;letter-spacing:-0.01em;font-size:clamp(1.75rem, 4.6vw, 5rem);margin:0;}
+.big-text{font-weight:500;line-height:1.15;letter-spacing:-0.01em;font-size:clamp(1.5rem, 3.2vw, 3rem);margin:0;}
 .word{color:rgba(255,255,255,.25);transition:color .15s;}
 .word.spoken{color:#fff;}
 audio{margin-top:8px;height:36px;max-width:360px;}
-`;
+` + AVATAR_BOX_CSS;
 
   const sectionsHtml = project.chunks
     .map((chunk, index) => {
+      const avatar = avatarForIndex(index, avatars);
       const avatarImage = avatarImagePath(chunk, index, avatars);
+      // Lunar always prefers the avatar's video over its 3D model, matching
+      // the live preview — never the plain static image when either is available.
+      const videoPath = avatarVideoPath(index, avatar);
+      const avatarMarkup = videoPath ? avatarVideoBoxHtml(videoPath) : avatarBoxHtml(avatarImage, avatar);
       const src = audioUrl(supabaseUrl, project.id, chunk);
       const words = chunk.narrativeText.split(/\s+/).filter(Boolean);
       const wordsHtml = words.map((w) => `<span class="word">${escapeHtml(w)} </span>`).join("");
       return `
 <section class="section${index % 2 === 1 ? " reversed" : ""}">
-  <div class="avatar-wrap">${avatarImage ? `<img src="${avatarImage}" alt="" />` : ""}</div>
+  <div class="avatar-wrap">${avatarMarkup}</div>
   <div class="copy">
     <span class="eyebrow">${String(index + 1).padStart(2, "0")} / ${String(project.chunks.length).padStart(2, "0")}</span>
     <h2>${escapeHtml(chunk.title)}</h2>
@@ -866,16 +1209,22 @@ function activateSection(section) {
     currentAudio = audio;
     trackHighlight(audio, words);
   }
+  var video = section.querySelector('video');
+  if (video) {
+    video.currentTime = 0;
+    video.play().catch(function(){});
+  }
 }
 
 document.querySelectorAll('.section').forEach(function(section){
   var audio = section.querySelector('audio');
+  var video = section.querySelector('video');
   ScrollTrigger.create({
     trigger: section, start: 'top center', end: 'bottom center',
     onEnter: function(){ activateSection(section); },
     onEnterBack: function(){ activateSection(section); },
-    onLeave: function(){ if (audio) audio.pause(); },
-    onLeaveBack: function(){ if (audio) audio.pause(); }
+    onLeave: function(){ if (audio) audio.pause(); if (video) video.pause(); },
+    onLeaveBack: function(){ if (audio) audio.pause(); if (video) video.pause(); }
   });
   gsap.fromTo(section.querySelector('.copy'), {opacity:0, y:24}, {
     opacity:1, y:0, duration:0.6, ease:'power2.out',
@@ -884,7 +1233,17 @@ document.querySelectorAll('.section').forEach(function(section){
 });
 ` + LUNAR_INIT_JS;
 
-  return documentWrap(project.title, css, body, js, [THREE_CDN]);
+  // Lunar prefers video over the 3D model (see sectionsHtml above), so the
+  // GLTFLoader/OrbitControls CDN scripts are only worth loading here for an
+  // avatar that has a model but no video to prefer instead.
+  const usesModelInLunar = avatars.some((avatar) => avatar.modelUrl && (!avatar.videoUrls || avatar.videoUrls.length === 0));
+  return documentWrap(
+    project.title,
+    css,
+    body,
+    js + (usesModelInLunar ? AVATAR3D_INIT_JS : ""),
+    dedupeScripts([THREE_CDN, ORBIT_CONTROLS_CDN, ...(usesModelInLunar ? AVATAR_MODEL_CDN_SCRIPTS : [])])
+  );
 }
 
 const AIRLOCK_VIDEO_CDN = "https://cdn.jsdelivr.net/gh/yuraoak/airlock-hero-assets@main";
@@ -917,18 +1276,18 @@ body{margin:0;font-family:-apple-system,'Segoe UI',sans-serif;background:#05070d
 @media(min-width:768px){.section.reversed{flex-direction:row-reverse;}}
 .avatar-wrap{width:100%;flex-shrink:0;display:flex;justify-content:center;}
 @media(min-width:768px){.avatar-wrap{width:36%;}}
-.avatar-wrap img{width:280px;height:280px;object-fit:contain;filter:drop-shadow(0 0 60px rgba(255,255,255,.1));}
-@media(min-width:768px){.avatar-wrap img{width:420px;height:420px;}}
-.copy{opacity:0;transform:translateY(24px);width:100%;display:flex;flex-direction:column;gap:24px;border-radius:16px;border:1px solid rgba(255,255,255,.05);background:rgba(255,255,255,.02);backdrop-filter:blur(4px);padding:32px;box-sizing:border-box;}
+.avatar-wrap .avatar-box{width:280px;height:280px;filter:drop-shadow(0 0 60px rgba(255,255,255,.1));}
+@media(min-width:768px){.avatar-wrap .avatar-box{width:420px;height:420px;}}
+.copy{opacity:0;transform:translateY(24px);width:100%;display:flex;flex-direction:column;gap:24px;border-radius:16px;border:1px solid rgba(255,255,255,.15);background:rgba(0,0,0,.4);box-shadow:0 8px 32px rgba(0,0,0,.35);padding:32px;box-sizing:border-box;}
 @media(min-width:768px){.copy{width:64%;}}
 .eyebrow{font-size:.75rem;font-weight:500;text-transform:uppercase;letter-spacing:.05em;color:rgba(255,255,255,.3);}
 .copy h2{font-size:1.5rem;font-weight:500;margin:0;}
 @media(min-width:768px){.copy h2{font-size:1.75rem;}}
-.big-text{font-weight:500;line-height:1.15;letter-spacing:-0.01em;font-size:clamp(1.75rem, 4.6vw, 5rem);margin:0;}
+.big-text{font-weight:500;line-height:1.15;letter-spacing:-0.01em;font-size:clamp(1.5rem, 3.2vw, 3rem);margin:0;}
 .word{color:rgba(255,255,255,.25);transition:color .15s;}
 .word.spoken{color:#fff;}
 audio{margin-top:8px;height:36px;max-width:360px;}
-`;
+` + AVATAR_BOX_CSS;
 
 function airlockHeroMarkup(title: string): string {
   return `
@@ -1105,13 +1464,14 @@ function renderAirlock(project: Project, avatars: Avatar[], supabaseUrl: string)
 
   const sectionsHtml = project.chunks
     .map((chunk, index) => {
+      const avatar = avatarForIndex(index, avatars);
       const avatarImage = avatarImagePath(chunk, index, avatars);
       const src = audioUrl(supabaseUrl, project.id, chunk);
       const words = chunk.narrativeText.split(/\s+/).filter(Boolean);
       const wordsHtml = words.map((w) => `<span class="word">${escapeHtml(w)} </span>`).join("");
       return `
 <section class="section${index % 2 === 1 ? " reversed" : ""}">
-  <div class="avatar-wrap">${avatarImage ? `<img src="${avatarImage}" alt="" />` : ""}</div>
+  <div class="avatar-wrap">${avatarBoxHtml(avatarImage, avatar)}</div>
   <div class="copy">
     <span class="eyebrow">${String(index + 1).padStart(2, "0")} / ${String(project.chunks.length).padStart(2, "0")}</span>
     <h2>${escapeHtml(chunk.title)}</h2>
@@ -1184,7 +1544,14 @@ document.querySelectorAll('.section').forEach(function(section){
 });
 ` + AIRLOCK_INIT_JS;
 
-  return documentWrap(project.title, css, body, js);
+  const needsModel = needsAvatarModel(avatars);
+  return documentWrap(
+    project.title,
+    css,
+    body,
+    js + (needsModel ? AVATAR3D_INIT_JS : ""),
+    needsModel ? AVATAR_MODEL_CDN_SCRIPTS : []
+  );
 }
 
 type CaseStudyRenderTheme = "light" | "space" | "lunar" | "airlock";
@@ -1192,6 +1559,7 @@ type CaseStudyRenderTheme = "light" | "space" | "lunar" | "airlock";
 function renderCaseStudy(project: Project, avatars: Avatar[], supabaseUrl: string): string {
   const sections = flattenCaseStudySections(project.caseStudyBinding?.slots ?? null);
   const sectionAudio = project.caseStudyBinding?.sectionAudio;
+  const sectionVideo = project.caseStudyBinding?.sectionVideo;
   // Case-study projects always render this layout regardless of
   // selectedTemplateId (see renderStaticSite) — picking "space"/"lunar"/
   // "airlock" there is still how they opt into those templates'
@@ -1205,10 +1573,16 @@ function renderCaseStudy(project: Project, avatars: Avatar[], supabaseUrl: strin
   const isDark = theme !== "light";
   const kicker = theme === "space" ? "Space" : theme === "lunar" ? "Lunar" : "Case study";
   const kickerColor = theme === "lunar" ? "rgba(103,232,249,.4)" : isDark ? "rgba(255,255,255,.3)" : "#a3a3a3";
-  const eyebrowColor = theme === "lunar" ? "rgba(165,243,252,.5)" : isDark ? "rgba(255,255,255,.3)" : "#a3a3a3";
+  const eyebrowColor = theme === "lunar" ? "rgba(165,243,252,.6)" : isDark ? "rgba(255,255,255,.4)" : "#a3a3a3";
   const borderColor = theme === "lunar" ? "rgba(34,211,238,.1)" : isDark ? "rgba(255,255,255,.05)" : "#f0f0f0";
   const avatarGlow = theme === "lunar" ? "rgba(120,180,255,.2)" : "rgba(180,220,255,.15)";
-  const copyBg = theme === "lunar" ? "rgba(255,255,255,.03)" : "rgba(255,255,255,.02)";
+  // Deliberately more opaque than borderColor/section dividers above: this is
+  // the actual glass card the body copy sits on. No blur — a dark, mostly
+  // transparent tint darkens the busy background just enough for text to
+  // read, while keeping the background (moon surface, starfield) sharp and
+  // visible through the card rather than dissolved into a blurred wash.
+  const panelBorderColor = theme === "lunar" ? "rgba(103,232,249,.2)" : "rgba(255,255,255,.15)";
+  const panelBg = "rgba(0,0,0,.4)";
 
   // Same big-text, word-highlight-as-spoken treatment as renderEditorial —
   // this template is the case-study data source with Editorial's visuals,
@@ -1232,33 +1606,38 @@ function renderCaseStudy(project: Project, avatars: Avatar[], supabaseUrl: strin
 @media(min-width:768px){.section.reversed{flex-direction:row-reverse;}}
 .avatar-wrap{width:100%;flex-shrink:0;display:flex;justify-content:center;}
 @media(min-width:768px){.avatar-wrap{width:36%;}}
-.avatar-wrap img{width:280px;height:280px;object-fit:contain;${isDark ? `filter:drop-shadow(0 0 60px ${avatarGlow});` : ""}}
-@media(min-width:768px){.avatar-wrap img{width:420px;height:420px;}}
+.avatar-wrap .avatar-box{width:280px;height:280px;${isDark ? `filter:drop-shadow(0 0 60px ${avatarGlow});` : ""}}
+@media(min-width:768px){.avatar-wrap .avatar-box{width:420px;height:420px;}}
 .copy{opacity:0;transform:translateY(24px);width:100%;display:flex;flex-direction:column;gap:24px;${
       isDark
-        ? `border-radius:16px;border:1px solid ${borderColor};background:${copyBg};backdrop-filter:blur(4px);padding:32px;box-sizing:border-box;`
+        ? `border-radius:16px;border:1px solid ${panelBorderColor};background:${panelBg};box-shadow:0 8px 32px rgba(0,0,0,.35);padding:32px;box-sizing:border-box;`
         : ""
     }}
 @media(min-width:768px){.copy{width:64%;}}
 .eyebrow{font-size:.75rem;font-weight:500;text-transform:uppercase;letter-spacing:.05em;color:${eyebrowColor};}
 .copy h2{font-size:1.5rem;font-weight:500;margin:0;}
 @media(min-width:768px){.copy h2{font-size:1.75rem;}}
-.big-text{font-weight:500;line-height:1.15;letter-spacing:-0.01em;font-size:clamp(1.75rem, 4.6vw, 5rem);margin:0;}
+.big-text{font-weight:500;line-height:1.15;letter-spacing:-0.01em;font-size:clamp(${isDark ? "1.5rem, 3.2vw, 3rem" : "1.75rem, 4.6vw, 5rem"});margin:0;}
 .word{color:${isDark ? "rgba(255,255,255,.25)" : "#d4d4d4"};transition:color .15s;}
 .word.spoken{color:${isDark ? "#fff" : "#171717"};}
 audio{margin-top:8px;height:36px;max-width:360px;}
-`;
+` + AVATAR_BOX_CSS;
 
   const sectionsHtml = sections
     .map((section, index) => {
       const avatar = avatarForIndex(index, avatars);
       const avatarImage = avatar ? bundlePath(getAvatarImage(avatar, section.emotion)) : null;
+      // Lunar always prefers the avatar's video over its 3D model, matching
+      // the live preview — never the plain static image when either is available.
+      const videoPath =
+        theme === "lunar" ? sectionVideoPath(supabaseUrl, project.id, section, index, avatar, sectionVideo) : undefined;
+      const avatarMarkup = videoPath ? avatarVideoBoxHtml(videoPath) : avatarBoxHtml(avatarImage, avatar);
       const src = sectionAudioUrl(supabaseUrl, project.id, section, sectionAudio);
       const words = section.body.split(/\s+/).filter(Boolean);
       const wordsHtml = words.map((w) => `<span class="word">${escapeHtml(w)} </span>`).join("");
       return `
 <section class="section${index % 2 === 1 ? " reversed" : ""}">
-  <div class="avatar-wrap">${avatarImage ? `<img src="${avatarImage}" alt="" />` : ""}</div>
+  <div class="avatar-wrap">${avatarMarkup}</div>
   <div class="copy">
     <span class="eyebrow">${escapeHtml(section.sectionLabel)}</span>
     <h2>${escapeHtml(section.title)}</h2>
@@ -1336,16 +1715,22 @@ function activateSection(section) {
     currentAudio = audio;
     trackHighlight(audio, words);
   }
+  var video = section.querySelector('video');
+  if (video) {
+    video.currentTime = 0;
+    video.play().catch(function(){});
+  }
 }
 
 document.querySelectorAll('.section').forEach(function(section){
   var audio = section.querySelector('audio');
+  var video = section.querySelector('video');
   ScrollTrigger.create({
     trigger: section, start: 'top center', end: 'bottom center',
     onEnter: function(){ activateSection(section); },
     onEnterBack: function(){ activateSection(section); },
-    onLeave: function(){ if (audio) audio.pause(); },
-    onLeaveBack: function(){ if (audio) audio.pause(); }
+    onLeave: function(){ if (audio) audio.pause(); if (video) video.pause(); },
+    onLeaveBack: function(){ if (audio) audio.pause(); if (video) video.pause(); }
   });
   gsap.fromTo(section.querySelector('.copy'), {opacity:0, y:24}, {
     opacity:1, y:0, duration:0.6, ease:'power2.out',
@@ -1354,7 +1739,21 @@ document.querySelectorAll('.section').forEach(function(section){
 });
 ` + (theme === "space" ? ASMR_INIT_JS : theme === "lunar" ? LUNAR_INIT_JS : theme === "airlock" ? AIRLOCK_INIT_JS : "");
 
-  return documentWrap(project.title, css, body, js, theme === "lunar" ? [THREE_CDN] : []);
+  // Lunar prefers video over the 3D model (see sectionsHtml above), so the
+  // GLTFLoader/OrbitControls CDN scripts are only worth loading here for an
+  // avatar that has a model but no video to prefer instead.
+  const usesModel =
+    theme === "lunar"
+      ? avatars.some((avatar) => avatar.modelUrl && (!avatar.videoUrls || avatar.videoUrls.length === 0))
+      : needsAvatarModel(avatars);
+  const themeScripts = theme === "lunar" ? [THREE_CDN, ORBIT_CONTROLS_CDN] : [];
+  return documentWrap(
+    project.title,
+    css,
+    body,
+    js + (usesModel ? AVATAR3D_INIT_JS : ""),
+    dedupeScripts([...themeScripts, ...(usesModel ? AVATAR_MODEL_CDN_SCRIPTS : [])])
+  );
 }
 
 export function renderStaticSite(project: Project, avatars: Avatar[], supabaseUrl: string): string {

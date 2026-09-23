@@ -66,6 +66,12 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
   const [caseStudyAudioProgress, setCaseStudyAudioProgress] = useState<{ completed: number; total: number } | null>(
     null
   );
+  const [generatingCaseStudyAvatarVideo, setGeneratingCaseStudyAvatarVideo] = useState(false);
+  const [caseStudyAvatarVideoError, setCaseStudyAvatarVideoError] = useState<string | null>(null);
+  const [caseStudyAvatarVideoProgress, setCaseStudyAvatarVideoProgress] = useState<{
+    completed: number;
+    total: number;
+  } | null>(null);
 
   useEffect(() => {
     fetch(`/api/projects/${id}`)
@@ -405,6 +411,45 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
     }
   }
 
+  async function handleGenerateCaseStudyAvatarVideo() {
+    setGeneratingCaseStudyAvatarVideo(true);
+    setCaseStudyAvatarVideoError(null);
+    setCaseStudyAvatarVideoProgress(null);
+    try {
+      const res = await fetch(`/api/projects/${id}/generate-case-study-avatar-video`, {
+        method: "POST",
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.error || "Failed to generate avatar video.");
+      }
+
+      let failures: { key: string; message: string }[] | undefined;
+      await readNdjsonStream(res, (message) => {
+        const msg = message as
+          | { type: "progress"; completed: number; total: number }
+          | { type: "done"; project: Project; failures?: { key: string; message: string }[] }
+          | { type: "error"; message: string };
+        if (msg.type === "progress") setCaseStudyAvatarVideoProgress({ completed: msg.completed, total: msg.total });
+        else if (msg.type === "done") {
+          setProject(msg.project);
+          failures = msg.failures;
+        } else if (msg.type === "error") throw new Error(msg.message);
+      });
+
+      if (failures && failures.length > 0) {
+        setCaseStudyAvatarVideoError(
+          `${failures.length} section(s) failed to generate avatar video — the rest succeeded. Click "Regenerate avatar video" to retry the missing ones.`
+        );
+      }
+    } catch (err) {
+      setCaseStudyAvatarVideoError(err instanceof Error ? err.message : "Failed to generate avatar video.");
+    } finally {
+      setGeneratingCaseStudyAvatarVideo(false);
+      setCaseStudyAvatarVideoProgress(null);
+    }
+  }
+
   const isBusy = generatingAll || generatingChunkId !== null;
   const isCaseStudyProject = project?.documentType === "case-study";
   // Case-study projects always publish their bound layout (see
@@ -681,6 +726,65 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
                       )}
                       {caseStudyAudioError && (
                         <p className="text-base text-red-600 dark:text-red-400">{caseStudyAudioError}</p>
+                      )}
+                    </div>
+                  );
+                })()}
+              {project.caseStudyBinding?.slots &&
+                selectedAvatarIds.includes("avatar-1") &&
+                selectedTemplateId === "lunar" &&
+                (() => {
+                  const sections = flattenCaseStudySections(project.caseStudyBinding.slots);
+                  const narratedCount = sections.filter(
+                    (section) => project.caseStudyBinding?.sectionAudio?.[section.key]
+                  ).length;
+                  const lipsyncedCount = sections.filter(
+                    (section) => project.caseStudyBinding?.sectionVideo?.[section.key]
+                  ).length;
+                  const allNarrated = sections.length > 0 && narratedCount === sections.length;
+                  return (
+                    <div className="flex flex-col gap-3 border-t border-neutral-100 pt-5 dark:border-white/10">
+                      <label className="text-xl font-medium text-neutral-800 dark:text-indigo-100">
+                        Avatar video
+                      </label>
+                      <p className="text-base text-neutral-500 dark:text-indigo-200/50">
+                        Lip-syncs Avatar 1&apos;s video to each section&apos;s narration audio (Lunar theme only).
+                        {!allNarrated && " Generate narration audio for every section first."}
+                      </p>
+                      <div className="flex flex-wrap items-center gap-4">
+                        <button
+                          type="button"
+                          onClick={handleGenerateCaseStudyAvatarVideo}
+                          disabled={!allNarrated || generatingCaseStudyAvatarVideo}
+                          className="rounded-full bg-gradient-to-r from-violet-500 to-cyan-400 px-6 py-3 text-lg font-semibold text-neutral-950 shadow-[0_0_24px_rgba(139,92,246,0.4)] disabled:opacity-30"
+                        >
+                          {generatingCaseStudyAvatarVideo
+                            ? "Generating avatar video…"
+                            : lipsyncedCount > 0
+                            ? "Regenerate avatar video"
+                            : "Generate avatar video"}
+                        </button>
+                        <span className="text-base font-medium text-neutral-500 dark:text-indigo-200/60">
+                          {lipsyncedCount}/{sections.length} sections lip-synced
+                        </span>
+                      </div>
+                      {generatingCaseStudyAvatarVideo && (
+                        <LoadingBar
+                          label="Generating avatar video…"
+                          progress={
+                            caseStudyAvatarVideoProgress
+                              ? caseStudyAvatarVideoProgress.completed / caseStudyAvatarVideoProgress.total
+                              : undefined
+                          }
+                          detail={
+                            caseStudyAvatarVideoProgress
+                              ? `${caseStudyAvatarVideoProgress.completed} / ${caseStudyAvatarVideoProgress.total} sections`
+                              : undefined
+                          }
+                        />
+                      )}
+                      {caseStudyAvatarVideoError && (
+                        <p className="text-base text-red-600 dark:text-red-400">{caseStudyAvatarVideoError}</p>
                       )}
                     </div>
                   );

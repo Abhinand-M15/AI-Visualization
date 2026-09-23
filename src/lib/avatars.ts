@@ -7,6 +7,16 @@ export interface Avatar {
   imageUrl: string;
   /** Per-emotion expression images. Not every avatar has every emotion. */
   emotions: Partial<Record<EmotionKey, string>>;
+  /** When set, this avatar renders as a live 3D model (this GLB) instead of
+   *  a flat image wherever it appears while narrating. No emotion variants —
+   *  one static pose stands in for every emotion. */
+  modelUrl?: string;
+  /** When set, a template can render this avatar as a looping, muted video
+   *  instead of the 3D model or flat image — an explicit per-template choice
+   *  (see AvatarDisplay's `mode` prop), not a replacement for modelUrl.
+   *  Multiple entries cycle across chunks/sections the same way avatars
+   *  themselves alternate — see avatarVideoForIndex. */
+  videoUrls?: string[];
 }
 
 export const AVATARS: Avatar[] = [
@@ -14,6 +24,8 @@ export const AVATARS: Avatar[] = [
     id: "avatar-1",
     name: "Avatar 1",
     imageUrl: "/avatars/avatar-1/neutral.png",
+    modelUrl: "/models/avatar-1-robot.glb",
+    videoUrls: ["/videos/avatar-1-lunar-explaining.mp4"],
     emotions: {
       neutral: "/avatars/avatar-1/neutral.png",
       confused: "/avatars/avatar-1/confused.png",

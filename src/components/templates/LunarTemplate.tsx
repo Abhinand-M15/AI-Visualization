@@ -4,7 +4,10 @@ import { useEffect, useRef } from "react";
 import gsap from "gsap";
 import { ScrollTrigger } from "gsap/ScrollTrigger";
 import { LunarBackground } from "@/components/ui/lunar-background";
-import { avatarImageForChunk, type TemplateProps } from "./types";
+import { avatarForIndex, type TemplateProps } from "./types";
+import { AvatarDisplay } from "./AvatarDisplay";
+import { NarrationMasterControl } from "@/components/ui/NarrationMasterControl";
+import { isNarrationPaused } from "@/lib/narrationControl";
 
 if (typeof window !== "undefined") gsap.registerPlugin(ScrollTrigger);
 
@@ -54,17 +57,32 @@ export default function LunarTemplate({ title, chunks, avatars }: TemplateProps)
         stopHighlightTracking();
         if (audio) {
           audio.currentTime = 0;
-          audio.play().catch(() => {
-            // Autoplay can be blocked before the user has interacted with the page —
-            // the visible <audio> controls still let them start it manually.
-          });
+          if (!isNarrationPaused()) {
+            audio.play().catch(() => {
+              // Autoplay can be blocked before the user has interacted with the page —
+              // the visible <audio> controls still let them start it manually.
+            });
+          }
           currentAudio = audio;
           trackHighlight(audio, words);
+        }
+
+        // Same on/off-screen play/pause as the audio above, not `autoPlay` —
+        // one <video> per section left to autoplay unconditionally bogs the
+        // page down. Restarting from 0 on every (re)entry is what makes
+        // scrolling back to an earlier section replay its clip from the top.
+        const video = section.querySelector<HTMLVideoElement>("video");
+        if (video) {
+          video.currentTime = 0;
+          if (!isNarrationPaused()) {
+            video.play().catch(() => {});
+          }
         }
       }
 
       sections.forEach((section) => {
         const audio = section.querySelector<HTMLAudioElement>("audio");
+        const video = section.querySelector<HTMLVideoElement>("video");
 
         ScrollTrigger.create({
           trigger: section,
@@ -72,8 +90,14 @@ export default function LunarTemplate({ title, chunks, avatars }: TemplateProps)
           end: "bottom center",
           onEnter: () => activateSection(section),
           onEnterBack: () => activateSection(section),
-          onLeave: () => audio?.pause(),
-          onLeaveBack: () => audio?.pause(),
+          onLeave: () => {
+            audio?.pause();
+            video?.pause();
+          },
+          onLeaveBack: () => {
+            audio?.pause();
+            video?.pause();
+          },
         });
 
         gsap.fromTo(
@@ -95,6 +119,7 @@ export default function LunarTemplate({ title, chunks, avatars }: TemplateProps)
   return (
     <div ref={containerRef} className="relative text-white">
       <LunarBackground />
+      <NarrationMasterControl />
 
       <header className="relative px-10 pb-16 pt-24">
         <span className="text-xs font-light uppercase tracking-[0.4em] text-cyan-200/40">Lunar</span>
@@ -102,7 +127,7 @@ export default function LunarTemplate({ title, chunks, avatars }: TemplateProps)
       </header>
 
       {chunks.map((chunk, index) => {
-        const avatarImage = avatarImageForChunk(chunk, index, avatars);
+        const avatar = avatarForIndex(index, avatars);
         const words = chunk.narrativeText.split(/\s+/).filter(Boolean);
         const isReversed = index % 2 === 1;
 
@@ -114,24 +139,24 @@ export default function LunarTemplate({ title, chunks, avatars }: TemplateProps)
             }`}
           >
             <div className="flex w-full flex-shrink-0 justify-center md:w-[36%]">
-              {avatarImage && (
-                // eslint-disable-next-line @next/next/no-img-element
-                <img
-                  src={avatarImage}
-                  alt=""
-                  className="h-[280px] w-[280px] object-contain drop-shadow-[0_0_60px_rgba(120,180,255,0.2)] md:h-[420px] md:w-[420px]"
+              {avatar && (
+                <AvatarDisplay
+                  avatar={avatar}
+                  emotion={chunk.emotion}
+                  mode="reactive"
+                  className="h-[340px] w-[340px] object-contain drop-shadow-[0_0_60px_rgba(120,180,255,0.2)] md:h-[520px] md:w-[520px]"
                 />
               )}
             </div>
 
-            <div className="lunar-copy flex w-full flex-col gap-6 rounded-2xl border border-cyan-500/10 bg-white/[0.03] p-8 backdrop-blur-sm md:w-[64%]">
-              <span className="text-xs font-medium uppercase tracking-wide text-cyan-200/50">
+            <div className="lunar-copy flex w-full flex-col gap-6 rounded-2xl border border-cyan-300/20 bg-black/40 p-8 shadow-[0_8px_32px_rgba(0,0,0,0.35)] md:w-[64%]">
+              <span className="text-xs font-medium uppercase tracking-wide text-cyan-200/60">
                 {String(index + 1).padStart(2, "0")} / {String(chunks.length).padStart(2, "0")}
               </span>
               <h2 className="text-2xl font-medium md:text-3xl">{chunk.title}</h2>
               <p
                 className="font-medium leading-[1.15] tracking-tight"
-                style={{ fontSize: "clamp(1.75rem, 4.6vw, 5rem)" }}
+                style={{ fontSize: "clamp(1.5rem, 3.2vw, 3rem)" }}
               >
                 {words.map((word, i) => (
                   <span key={i} className="word text-white/25 transition-colors duration-150">

@@ -105,7 +105,7 @@ const FALLBACK_GENERATE_SYSTEM_PROMPT = `You turn a business document into a nar
 Rules:
 - Only use facts that are literally present in the source document. Never invent people, numbers, or events.
 - Break the story into as many chunks as the document's content naturally supports — favor more, shorter chunks over fewer, longer ones. Most documents should yield somewhere between 6 and 14 chunks; let the actual content decide, don't force a fixed count.
-- Each chunk's narrativeText should be 2-5 sentences, written in a natural, spoken-narration tone (this text will later be converted to speech) — not bullet points, not a dry summary.
+- Each chunk's narrativeText must be no more than 80 words — aim for 70-80 words, written in a natural, spoken-narration tone (this text will later be converted to speech) — not bullet points, not a dry summary. Stay under the limit; don't pad to reach it.
 - Order chunks so the story reads coherently start to finish (chronological or logical progression through the document).
 - The overall title should be short and compelling, grounded in the document's actual subject.
 - Tag each chunk with the single narrative-beat "emotion" that best fits it: "confused" for a problem/struggle/challenge, "thinking" for reflective/evaluating content, "idea" for a breakthrough or decision point, "solution" for implementing a fix/strategy/plan, "happy" for a positive outcome or success, "neutral" for introductory/factual content that isn't any of those. Most real stories use several different tags across their chunks — don't tag everything "neutral".`;
@@ -126,7 +126,7 @@ Rules:
 - Only use facts that are literally present in the source document. Never invent people, numbers, or events.
 - Break the story into as many chunks as the document's content naturally supports — there is no fixed or target count. A dense document (e.g. a 50-slide deck where each slide presents its own challenge, its own solution, and its own measurable impact) should produce a separate problem/solution/impact chunk for EVERY such scenario the document presents — do not compress multiple distinct scenarios into one chunk, and do not cap how many chunks you produce. A short document should produce only as many chunks as it actually supports.
 - Every chunk belongs to exactly one of five sections — domain, customer, problem, solution, impact (see phase tagging below). domain and customer are usually one chunk each (the overall industry, the overall customer), but produce more than one of either if the document genuinely describes multiple domains or multiple customers. problem/solution/impact each get one chunk per distinct instance the document presents.
-- Each chunk's narrativeText should be 2-5 sentences, written in a natural, spoken-narration tone (this text will later be converted to speech) — not bullet points, not a dry summary.
+- Each chunk's narrativeText must be no more than 80 words — aim for 70-80 words, written in a natural, spoken-narration tone (this text will later be converted to speech) — not bullet points, not a dry summary. Stay under the limit; don't pad to reach it. If a scenario genuinely needs more room, split it into an additional chunk rather than writing a longer one.
 - Order chunks so the story reads coherently start to finish: domain, then customer, then each problem/solution/impact scenario in the order the document presents them (grouping a scenario's problem, solution, and impact together if the document does).
 - The overall title should be short and compelling, grounded in the document's actual subject.
 - Tag each chunk with the single narrative-beat "emotion" that best fits it: "confused" for a problem/struggle/challenge, "thinking" for reflective/evaluating content, "idea" for a breakthrough or decision point, "solution" for implementing a fix/strategy/plan, "happy" for a positive outcome or success, "neutral" for introductory/factual content that isn't any of those.
@@ -163,6 +163,32 @@ interface GeminiStorylineResponse {
   }>;
 }
 
+// Prompt instructions alone don't reliably hold a model to a hard word
+// count — this is the actual guarantee. Applied to every chunk except ones
+// marked userEdited, since those must be preserved verbatim regardless of
+// length (see the revise system prompts' rules on that).
+const MAX_NARRATIVE_WORDS = 80;
+
+function capWords(text: string, maxWords: number): string {
+  const trimmed = text.trim();
+  const words = trimmed.split(/\s+/);
+  if (words.length <= maxWords) return trimmed;
+  const truncated = words.slice(0, maxWords).join(" ");
+  // Prefer ending on a real sentence boundary within the limit so a
+  // truncated chunk still reads as a complete thought rather than stopping
+  // mid-sentence — but only if that boundary isn't so early it throws away
+  // most of the content.
+  const lastSentenceEnd = Math.max(
+    truncated.lastIndexOf(". "),
+    truncated.lastIndexOf("! "),
+    truncated.lastIndexOf("? ")
+  );
+  if (lastSentenceEnd > truncated.length * 0.5) {
+    return truncated.slice(0, lastSentenceEnd + 1);
+  }
+  return /[.!?]$/.test(truncated) ? truncated : `${truncated}.`;
+}
+
 function coercePhase(value: string | undefined): CaseStudyPhase | undefined {
   return CASE_STUDY_PHASES.includes(value as CaseStudyPhase) ? (value as CaseStudyPhase) : undefined;
 }
@@ -188,7 +214,7 @@ function toStoryline(raw: GeminiStorylineResponse, previousChunks?: Chunk[]): St
         id: previous?.id ?? `chunk-${index + 1}`,
         order: index + 1,
         title: chunk.title,
-        narrativeText: chunk.narrativeText,
+        narrativeText: previous?.userEdited ? chunk.narrativeText : capWords(chunk.narrativeText, MAX_NARRATIVE_WORDS),
         emotion: chunk.emotion ?? "neutral",
         userEdited: previous?.userEdited ?? false,
         phase,

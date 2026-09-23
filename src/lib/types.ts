@@ -82,6 +82,14 @@ export interface CaseStudyBinding {
    * rephrasing/compression), and "company" has no backing chunk at all.
    */
   sectionAudio?: Record<string, string>;
+  /**
+   * Wav2Lip-rendered avatar video per section, keyed identically to
+   * sectionAudio. Set by /generate-case-study-avatar-video. Only populated
+   * for the avatar/template combination that supports video mode (currently:
+   * avatar-1 + Lunar theme). Falls back to the avatar's default looping
+   * video when a section hasn't been generated yet.
+   */
+  sectionVideo?: Record<string, string>;
 }
 
 export interface Project {

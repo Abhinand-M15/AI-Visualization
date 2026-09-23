@@ -3,7 +3,10 @@
 import { useEffect, useRef } from "react";
 import gsap from "gsap";
 import { ScrollTrigger } from "gsap/ScrollTrigger";
-import { avatarImageForChunk, type TemplateProps } from "./types";
+import { avatarForIndex, type TemplateProps } from "./types";
+import { AvatarDisplay } from "./AvatarDisplay";
+import { NarrationMasterControl } from "@/components/ui/NarrationMasterControl";
+import { isNarrationPaused } from "@/lib/narrationControl";
 
 if (typeof window !== "undefined") gsap.registerPlugin(ScrollTrigger);
 
@@ -65,10 +68,12 @@ export default function EditorialTemplate({ title, chunks, avatars }: TemplatePr
         stopHighlightTracking();
         if (audio) {
           audio.currentTime = 0;
-          audio.play().catch(() => {
-            // Autoplay can be blocked before the user has interacted with the page —
-            // the visible <audio> controls still let them start it manually.
-          });
+          if (!isNarrationPaused()) {
+            audio.play().catch(() => {
+              // Autoplay can be blocked before the user has interacted with the page —
+              // the visible <audio> controls still let them start it manually.
+            });
+          }
           currentAudio = audio;
           trackHighlight(audio, words);
         }
@@ -105,12 +110,13 @@ export default function EditorialTemplate({ title, chunks, avatars }: TemplatePr
 
   return (
     <div ref={containerRef} className="bg-white text-neutral-900">
+      <NarrationMasterControl />
       <header className="px-10 pb-16 pt-24">
         <h1 className="max-w-3xl text-4xl font-medium leading-tight md:text-5xl">{title}</h1>
       </header>
 
       {chunks.map((chunk, index) => {
-        const avatarImage = avatarImageForChunk(chunk, index, avatars);
+        const avatar = avatarForIndex(index, avatars);
         const words = chunk.narrativeText.split(/\s+/).filter(Boolean);
         const isReversed = index % 2 === 1;
 
@@ -122,12 +128,11 @@ export default function EditorialTemplate({ title, chunks, avatars }: TemplatePr
             }`}
           >
             <div className="flex w-full flex-shrink-0 justify-center md:w-[36%]">
-              {avatarImage && (
-                // eslint-disable-next-line @next/next/no-img-element
-                <img
-                  src={avatarImage}
-                  alt=""
-                  className="h-[280px] w-[280px] object-contain md:h-[420px] md:w-[420px]"
+              {avatar && (
+                <AvatarDisplay
+                  avatar={avatar}
+                  emotion={chunk.emotion}
+                  className="h-[340px] w-[340px] object-contain md:h-[520px] md:w-[520px]"
                 />
               )}
             </div>

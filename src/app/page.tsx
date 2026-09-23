@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useEffect, useState } from "react";
+import { SpaceBackdrop } from "@/components/SpaceBackdrop";
 import type { Project } from "@/lib/types";
 
 export default function HomePage() {
@@ -37,7 +38,8 @@ export default function HomePage() {
   }
 
   return (
-    <main className="mx-auto flex w-full max-w-3xl flex-1 flex-col gap-8 px-6 py-16">
+    <main className="relative mx-auto flex w-full max-w-3xl flex-1 flex-col gap-8 px-6 py-16">
+      <SpaceBackdrop />
       <header className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-semibold">Story Site Generator</h1>
@@ -58,14 +60,14 @@ export default function HomePage() {
         {deleteError && <p className="text-sm text-red-600">{deleteError}</p>}
         {!error && projects === null && <p className="text-sm text-neutral-500">Loading projects…</p>}
         {projects !== null && projects.length === 0 && (
-          <p className="rounded-xl border border-dashed border-neutral-300 p-8 text-center text-sm text-neutral-500 dark:border-neutral-700">
+          <p className="rounded-xl border border-dashed border-neutral-300 bg-white p-8 text-center text-sm text-neutral-500 dark:border-neutral-700 dark:bg-white/[0.03] dark:backdrop-blur-sm">
             No stories yet. Click &ldquo;New story&rdquo; to upload your first document.
           </p>
         )}
         {projects?.map((project) => (
           <div
             key={project.id}
-            className="flex items-center justify-between gap-3 rounded-xl border border-neutral-200 p-4 hover:border-neutral-400 dark:border-neutral-800 dark:hover:border-neutral-600"
+            className="flex items-center justify-between gap-3 rounded-xl border border-neutral-200 bg-white p-4 hover:border-neutral-400 dark:border-neutral-800 dark:bg-white/[0.03] dark:shadow-[0_0_40px_rgba(99,102,241,0.06)] dark:backdrop-blur-sm dark:hover:border-neutral-600"
           >
             <Link href={`/projects/${project.id}`} className="min-w-0 flex-1">
               <p className="truncate font-medium">{project.title}</p>

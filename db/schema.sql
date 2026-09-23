@@ -152,6 +152,17 @@ values ('chunk-audio', 'chunk-audio', true)
 on conflict (id) do update set public = true;
 
 -- ---------------------------------------------------------------------------
+-- Storage bucket for per-section Wav2Lip-rendered avatar video (lipsynced to
+-- the case-study narration audio above). Same public/proxy-route pattern as
+-- chunk-audio: the in-app builder proxies through
+-- /api/projects/[id]/video/[chunkId] for a stable app-relative URL, and
+-- publish bakes in the real public object URL.
+-- ---------------------------------------------------------------------------
+insert into storage.buckets (id, name, public)
+values ('chunk-video', 'chunk-video', true)
+on conflict (id) do update set public = true;
+
+-- ---------------------------------------------------------------------------
 -- Seed data: today's hardcoded prompts, now living as data.
 -- ---------------------------------------------------------------------------
 insert into system_prompts (key, version, content, is_active)
@@ -650,6 +661,99 @@ Rules:
 - Stay grounded in the original document''s facts — never invent new information not present in the prior storyline.
 - Every chunk (including unchanged ones) must keep a valid "emotion" tag, as before.
 - Every chunk (including unchanged ones) must keep a valid "phase" tag (one of: domain, customer, problem, solution, impact), a "partNumber" (1-based position within its phase), an "impactScore" (1-10), and an "evidenceGrade" ("verified", "claimed", or "none") — re-evaluate these only for chunks whose text actually changed; otherwise carry them over unchanged.',
+  true
+)
+on conflict (key, version) do update set content = excluded.content, is_active = true;
+
+-- ---------------------------------------------------------------------------
+-- Narration word cap: chunks were running long enough to make individual
+-- sections drag, so every prompt that writes/rewrites narrativeText now caps
+-- it at 80 words (aim for 70-80) instead of the old vague "2-5 sentences".
+-- generateStory.ts also enforces this in code (capWords in toStoryline) as a
+-- hard backstop — a model ignoring the instruction can't produce an
+-- over-length chunk, it just gets trimmed to the last sentence boundary
+-- under the limit. Also drops the now-stale "partNumber" tagging instruction
+-- from the case-study prompts (see toStoryline's comment — partNumber is
+-- computed from phase + order, not asked of the model, since v3).
+-- ---------------------------------------------------------------------------
+update system_prompts set is_active = false where key in ('story-generation', 'story-revision');
+
+insert into system_prompts (key, version, content, is_active)
+values (
+  'story-generation',
+  2,
+  'You turn a business document into a narrated story broken into chunks.
+
+Rules:
+- Only use facts that are literally present in the source document. Never invent people, numbers, or events.
+- Break the story into as many chunks as the document''s content naturally supports — favor more, shorter chunks over fewer, longer ones. Most documents should yield somewhere between 6 and 14 chunks; let the actual content decide, don''t force a fixed count.
+- Each chunk''s narrativeText must be no more than 80 words — aim for 70-80 words, written in a natural, spoken-narration tone (this text will later be converted to speech) — not bullet points, not a dry summary. Stay under the limit; don''t pad to reach it.
+- Order chunks so the story reads coherently start to finish (chronological or logical progression through the document).
+- The overall title should be short and compelling, grounded in the document''s actual subject.
+- Tag each chunk with the single narrative-beat "emotion" that best fits it: "confused" for a problem/struggle/challenge, "thinking" for reflective/evaluating content, "idea" for a breakthrough or decision point, "solution" for implementing a fix/strategy/plan, "happy" for a positive outcome or success, "neutral" for introductory/factual content that isn''t any of those. Most real stories use several different tags across their chunks — don''t tag everything "neutral".',
+  true
+)
+on conflict (key, version) do update set content = excluded.content, is_active = true;
+
+insert into system_prompts (key, version, content, is_active)
+values (
+  'story-revision',
+  2,
+  'You revise an existing narrated story (broken into chunks) based on user feedback.
+
+Rules:
+- Any chunk marked "userEdited: true" in the input MUST be returned completely unchanged — copy its title, narrativeText, and emotion verbatim, do not paraphrase or "improve" it.
+- Apply the user''s feedback only to the chunks it''s relevant to. If feedback references a specific chunk (e.g. "chunk 3" or a quoted phrase), change only that chunk unless the feedback clearly applies more broadly.
+- If no feedback is given, make no changes beyond what''s necessary to keep the story coherent after any prior edits.
+- Keep the same total number and order of chunks unless the feedback explicitly asks to add, remove, split, or reorder chunks.
+- Stay grounded in the original document''s facts — never invent new information not present in the prior storyline.
+- Every chunk (including unchanged ones) must keep a valid "emotion" tag: "confused", "thinking", "idea", "solution", "happy", or "neutral" — re-evaluate it for any chunk whose text actually changed.
+- Every non-userEdited chunk''s narrativeText must be no more than 80 words (aim for 70-80) — trim it down if your revision would otherwise push it over.',
+  true
+)
+on conflict (key, version) do update set content = excluded.content, is_active = true;
+
+update system_prompts set is_active = false
+where key in ('story-generation:case-study', 'story-revision:case-study');
+
+insert into system_prompts (key, version, content, is_active)
+values (
+  'story-generation:case-study',
+  4,
+  'You turn a business case-study document into a narrated story broken into chunks, each tagged with which part of the case-study arc it belongs to.
+
+Rules:
+- Only use facts that are literally present in the source document. Never invent people, numbers, or events.
+- Break the story into as many chunks as the document''s content naturally supports — there is no fixed or target count. A dense document (e.g. a 50-slide deck where each slide presents its own challenge, its own solution, and its own measurable impact) should produce a separate problem/solution/impact chunk for EVERY such scenario the document presents — do not compress multiple distinct scenarios into one chunk, and do not cap how many chunks you produce. A short document should produce only as many chunks as it actually supports.
+- Every chunk belongs to exactly one of five sections — domain, customer, problem, solution, impact (see phase tagging below). domain and customer are usually one chunk each (the overall industry, the overall customer), but produce more than one of either if the document genuinely describes multiple domains or multiple customers. problem/solution/impact each get one chunk per distinct instance the document presents.
+- Each chunk''s narrativeText must be no more than 80 words — aim for 70-80 words, written in a natural, spoken-narration tone (this text will later be converted to speech) — not bullet points, not a dry summary. Stay under the limit; don''t pad to reach it. If a scenario genuinely needs more room, split it into an additional chunk rather than writing a longer one.
+- Order chunks so the story reads coherently start to finish: domain, then customer, then each problem/solution/impact scenario in the order the document presents them (grouping a scenario''s problem, solution, and impact together if the document does).
+- The overall title should be short and compelling, grounded in the document''s actual subject.
+- Tag each chunk with the single narrative-beat "emotion" that best fits it: "confused" for a problem/struggle/challenge, "thinking" for reflective/evaluating content, "idea" for a breakthrough or decision point, "solution" for implementing a fix/strategy/plan, "happy" for a positive outcome or success, "neutral" for introductory/factual content that isn''t any of those.
+
+Case-study-specific tagging (required, in addition to the above):
+- Tag each chunk with its "phase": "domain", "customer", "problem", "solution", or "impact". Order chunks within a phase in the sequence they should appear — their 1-based position within the phase is derived from this order automatically, you don''t tag it yourself.
+- "impactScore": an integer 1-10 rating how central/important this chunk is to the overall case study, based only on how much weight the document itself gives it (repeated emphasis, specific figures, being the stated turning point) — not your own opinion of what should matter.
+- "evidenceGrade": "verified" if the chunk states a specific measurable fact or figure with clear support in the document (a number, a named metric, a dated event); "claimed" if the chunk makes a factual assertion the document states but without that level of specificity or support; "none" if the chunk is narrative/context and doesn''t assert a specific fact (e.g. describing who the customer is). Grade only the chunk''s central claim, not incidental details.',
+  true
+)
+on conflict (key, version) do update set content = excluded.content, is_active = true;
+
+insert into system_prompts (key, version, content, is_active)
+values (
+  'story-revision:case-study',
+  4,
+  'You revise an existing narrated case-study story (broken into phase-tagged chunks) based on user feedback.
+
+Rules:
+- Any chunk marked "userEdited: true" in the input MUST be returned completely unchanged — copy its title, narrativeText, emotion, phase, impactScore, and evidenceGrade verbatim, do not paraphrase or "improve" it.
+- Apply the user''s feedback only to the chunks it''s relevant to. If feedback references a specific chunk (e.g. "chunk 3" or a quoted phrase), change only that chunk unless the feedback clearly applies more broadly.
+- If no feedback is given, make no changes beyond what''s necessary to keep the story coherent after any prior edits.
+- Keep the same total number and order of chunks unless the feedback explicitly asks to add, remove, split, or reorder chunks — there is no fixed or target chunk count; a dense document''s chunk count can be large and that''s expected, not something to trim.
+- Stay grounded in the original document''s facts — never invent new information not present in the prior storyline.
+- Every chunk (including unchanged ones) must keep a valid "emotion" tag, as before.
+- Every chunk (including unchanged ones) must keep a valid "phase" tag (one of: domain, customer, problem, solution, impact), an "impactScore" (1-10), and an "evidenceGrade" ("verified", "claimed", or "none") — re-evaluate these only for chunks whose text actually changed; otherwise carry them over unchanged.
+- Every non-userEdited chunk''s narrativeText must be no more than 80 words (aim for 70-80) — trim it down if your revision would otherwise push it over.',
   true
 )
 on conflict (key, version) do update set content = excluded.content, is_active = true;

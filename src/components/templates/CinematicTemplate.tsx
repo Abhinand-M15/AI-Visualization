@@ -3,7 +3,9 @@
 import { useEffect, useRef } from "react";
 import gsap from "gsap";
 import { ScrollTrigger } from "gsap/ScrollTrigger";
-import { avatarImageForChunk, type TemplateProps } from "./types";
+import { avatarForIndex, type TemplateProps } from "./types";
+import { AvatarDisplay } from "./AvatarDisplay";
+import { NarrationMasterControl } from "@/components/ui/NarrationMasterControl";
 
 if (typeof window !== "undefined") gsap.registerPlugin(ScrollTrigger);
 
@@ -44,13 +46,14 @@ export default function CinematicTemplate({ title, chunks, avatars }: TemplatePr
 
   return (
     <div ref={containerRef} className="text-white">
+      <NarrationMasterControl />
       <div className="flex h-screen flex-col items-center justify-center px-6" style={{ background: PALETTE[0] }}>
         <h1 className="max-w-2xl text-center text-4xl font-medium leading-tight">{title}</h1>
         <p className="mt-4 text-sm uppercase tracking-widest text-white/50">Scroll to begin</p>
       </div>
 
       {chunks.map((chunk, index) => {
-        const avatarImage = avatarImageForChunk(chunk, index, avatars);
+        const avatar = avatarForIndex(index, avatars);
         const bg = PALETTE[(index + 1) % PALETTE.length];
         return (
           <section
@@ -59,12 +62,11 @@ export default function CinematicTemplate({ title, chunks, avatars }: TemplatePr
             style={{ background: bg }}
           >
             <div className="cinematic-content flex flex-col items-center gap-6">
-              {avatarImage && (
-                // eslint-disable-next-line @next/next/no-img-element
-                <img
-                  src={avatarImage}
-                  alt=""
-                  className="h-44 w-44 object-contain drop-shadow-[0_0_60px_rgba(255,255,255,0.15)]"
+              {avatar && (
+                <AvatarDisplay
+                  avatar={avatar}
+                  emotion={chunk.emotion}
+                  className="h-56 w-56 object-contain drop-shadow-[0_0_60px_rgba(255,255,255,0.15)]"
                 />
               )}
               <span className="text-xs uppercase tracking-widest text-white/40">
