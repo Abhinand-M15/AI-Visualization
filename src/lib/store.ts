@@ -3,12 +3,65 @@ import type { Chunk, DocumentType, Project, Storyline } from "@/lib/types";
 
 type Status = "idle" | "generating" | "reviewing" | "revising" | "saving" | "error";
 
+/** An API error that carries the server's machine-readable code (e.g. 'missing_api_key'). */
+class ApiError extends Error {
+  constructor(message: string, readonly code?: string) {
+    super(message);
+  }
+}
+
+/**
+ * Uploads `file` straight to Supabase Storage through a signed upload URL from
+ * /api/uploads. Returns the storage path, or null when the server says to use
+ * the multipart upload instead ({ direct: false }) or the uploads route itself
+ * is unavailable. Validation errors (type, size, sign-in) are thrown.
+ */
+async function uploadDirect(file: File): Promise<string | null> {
+  let ticket: { direct?: boolean; path?: string; signedUrl?: string; error?: string; code?: string };
+  let res: Response;
+  try {
+    res = await fetch("/api/uploads", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ fileName: file.name, size: file.size, mimeType: file.type }),
+    });
+    ticket = await res.json();
+  } catch {
+    return null;
+  }
+  if (res.status === 400 || res.status === 401 || res.status === 413) {
+    throw new ApiError(ticket.error || "The file can't be uploaded.", ticket.code);
+  }
+  if (!res.ok || !ticket.direct || !ticket.path || !ticket.signedUrl) return null;
+
+  // Same request shape as supabase-js uploadToSignedUrl(): the token in the URL authorises it.
+  const body = new FormData();
+  body.append("cacheControl", "3600");
+  body.append("", file);
+  const upload = await fetch(ticket.signedUrl, { method: "PUT", body });
+  if (!upload.ok) {
+    let message = `Upload failed (HTTP ${upload.status}).`;
+    try {
+      const data = await upload.json();
+      if (data?.message || data?.error) message = `Upload failed: ${data.message || data.error}`;
+    } catch {
+      // keep the generic message
+    }
+    throw new ApiError(message);
+  }
+  return ticket.path;
+}
+
 interface DraftState {
   documentType: DocumentType | null;
   sourceFileName?: string;
+  /** documents.id of a direct upload (accounts on), linked to the project on save. */
+  documentId?: string;
   storyline: Storyline | null;
   status: Status;
   errorMessage?: string;
+  /** Machine-readable error code from the API, e.g. 'missing_api_key'. */
+  errorCode?: string;
 
   generate: (file: File, documentType: DocumentType, targetChunkCount?: number) => Promise<void>;
   editChunk: (chunkId: string, updates: Partial<Pick<Chunk, "title" | "narrativeText">>) => void;
@@ -20,29 +73,50 @@ interface DraftState {
 export const useDraftStore = create<DraftState>((set, get) => ({
   documentType: null,
   sourceFileName: undefined,
+  documentId: undefined,
   storyline: null,
   status: "idle",
   errorMessage: undefined,
+  errorCode: undefined,
 
   generate: async (file, documentType, targetChunkCount) => {
-    set({ status: "generating", errorMessage: undefined, documentType });
+    set({ status: "generating", errorMessage: undefined, errorCode: undefined, documentType, documentId: undefined });
     try {
-      const formData = new FormData();
-      formData.append("file", file);
-      formData.append("documentType", documentType);
-      if (targetChunkCount) formData.append("targetChunkCount", String(targetChunkCount));
+      // Preferred: upload straight to storage (no Vercel body-size limit), then
+      // generate from the stored file. Falls back to the original multipart
+      // upload whenever /api/uploads says { direct: false } (accounts off, or
+      // the documents bucket isn't set up yet).
+      const storagePath = await uploadDirect(file);
 
-      const res = await fetch("/api/parse-and-generate", { method: "POST", body: formData });
+      let res: Response;
+      if (storagePath) {
+        res = await fetch("/api/parse-and-generate", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ storagePath, fileName: file.name, documentType, targetChunkCount }),
+        });
+      } else {
+        const formData = new FormData();
+        formData.append("file", file);
+        formData.append("documentType", documentType);
+        if (targetChunkCount) formData.append("targetChunkCount", String(targetChunkCount));
+        res = await fetch("/api/parse-and-generate", { method: "POST", body: formData });
+      }
       const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "Failed to generate storyline.");
+      if (!res.ok) throw new ApiError(data.error || "Failed to generate storyline.", data.code);
 
       set({
         storyline: data.storyline,
         sourceFileName: data.sourceFileName,
+        documentId: data.documentId,
         status: "reviewing",
       });
     } catch (error) {
-      set({ status: "error", errorMessage: error instanceof Error ? error.message : "Unexpected error" });
+      set({
+        status: "error",
+        errorMessage: error instanceof Error ? error.message : "Unexpected error",
+        errorCode: error instanceof ApiError ? error.code : undefined,
+      });
     }
   },
 
@@ -70,15 +144,19 @@ export const useDraftStore = create<DraftState>((set, get) => ({
         body: JSON.stringify({ storyline, feedbackText, documentType: get().documentType }),
       });
       const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "Failed to revise storyline.");
+      if (!res.ok) throw new ApiError(data.error || "Failed to revise storyline.", data.code);
       set({ storyline: data.storyline, status: "reviewing" });
     } catch (error) {
-      set({ status: "error", errorMessage: error instanceof Error ? error.message : "Unexpected error" });
+      set({
+        status: "error",
+        errorMessage: error instanceof Error ? error.message : "Unexpected error",
+        errorCode: error instanceof ApiError ? error.code : undefined,
+      });
     }
   },
 
   save: async () => {
-    const { storyline, documentType, sourceFileName } = get();
+    const { storyline, documentType, sourceFileName, documentId } = get();
     if (!storyline || !documentType) return null;
     set({ status: "saving", errorMessage: undefined });
     try {
@@ -90,6 +168,7 @@ export const useDraftStore = create<DraftState>((set, get) => ({
           documentType,
           sourceFileName,
           chunks: storyline.chunks,
+          ...(documentId ? { documentId } : {}),
         }),
       });
       const data = await res.json();
@@ -106,8 +185,10 @@ export const useDraftStore = create<DraftState>((set, get) => ({
     set({
       documentType: null,
       sourceFileName: undefined,
+      documentId: undefined,
       storyline: null,
       status: "idle",
       errorMessage: undefined,
+      errorCode: undefined,
     }),
 }));

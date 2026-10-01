@@ -6,12 +6,15 @@ import { ScrollTrigger } from "gsap/ScrollTrigger";
 import { avatarForIndex, type TemplateProps } from "./types";
 import { AvatarDisplay } from "./AvatarDisplay";
 import { NarrationMasterControl } from "@/components/ui/NarrationMasterControl";
+import { NARRATION_DOCK_THEMES } from "@/lib/narrationDock";
 import { isNarrationPaused } from "@/lib/narrationControl";
+import { useNarrationAutoScroll } from "@/lib/useNarrationAutoScroll";
 
 if (typeof window !== "undefined") gsap.registerPlugin(ScrollTrigger);
 
 export default function EditorialTemplate({ title, chunks, avatars }: TemplateProps) {
   const containerRef = useRef<HTMLDivElement>(null);
+  useNarrationAutoScroll(containerRef, ".editorial-section");
 
   useEffect(() => {
     const ctx = gsap.context(() => {
@@ -71,7 +74,7 @@ export default function EditorialTemplate({ title, chunks, avatars }: TemplatePr
           if (!isNarrationPaused()) {
             audio.play().catch(() => {
               // Autoplay can be blocked before the user has interacted with the page —
-              // the visible <audio> controls still let them start it manually.
+              // scrolling the section back into view tries again.
             });
           }
           currentAudio = audio;
@@ -110,9 +113,9 @@ export default function EditorialTemplate({ title, chunks, avatars }: TemplatePr
 
   return (
     <div ref={containerRef} className="bg-white text-neutral-900">
-      <NarrationMasterControl />
+      <NarrationMasterControl theme={NARRATION_DOCK_THEMES.light} />
       <header className="px-10 pb-16 pt-24">
-        <h1 className="max-w-3xl text-4xl font-medium leading-tight md:text-5xl">{title}</h1>
+        <h1 className="max-w-3xl text-2xl font-medium leading-tight md:text-[1.75rem]">{title}</h1>
       </header>
 
       {chunks.map((chunk, index) => {
@@ -141,10 +144,10 @@ export default function EditorialTemplate({ title, chunks, avatars }: TemplatePr
               <span className="text-xs font-medium uppercase tracking-wide text-neutral-400">
                 {String(index + 1).padStart(2, "0")} / {String(chunks.length).padStart(2, "0")}
               </span>
-              <h2 className="text-2xl font-medium md:text-3xl">{chunk.title}</h2>
+              <h2 className="text-base font-medium md:text-lg">{chunk.title}</h2>
               <p
-                className="font-medium leading-[1.15] tracking-tight"
-                style={{ fontSize: "clamp(1.75rem, 4.6vw, 5rem)" }}
+                className="font-medium leading-normal tracking-tight"
+                style={{ fontSize: "clamp(0.9375rem, 1.25vw, 1.125rem)" }}
               >
                 {words.map((word, i) => (
                   <span key={i} className="word text-neutral-300 transition-colors duration-150">
@@ -153,8 +156,7 @@ export default function EditorialTemplate({ title, chunks, avatars }: TemplatePr
                 ))}
               </p>
               {chunk.audioUrl && (
-                // eslint-disable-next-line jsx-a11y/media-has-caption
-                <audio controls src={chunk.audioUrl} className="mt-2 h-9 max-w-sm" />
+                <audio src={chunk.audioUrl} />
               )}
             </div>
           </section>

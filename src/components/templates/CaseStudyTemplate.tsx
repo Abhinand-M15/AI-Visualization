@@ -8,10 +8,13 @@ import type { CaseStudySection } from "@/lib/caseStudySections";
 import { avatarForIndex } from "./types";
 import { AvatarDisplay } from "./AvatarDisplay";
 import { ASMRBackground } from "@/components/ui/asmr-background";
-import { LunarBackground } from "@/components/ui/lunar-background";
+import { lunarHeroDescription } from "@/lib/lunarHero";
+import { LunarHero } from "./LunarHero";
 import AirlockHero from "@/components/ui/airlock-spaceship-hero";
 import { NarrationMasterControl } from "@/components/ui/NarrationMasterControl";
 import { isNarrationPaused } from "@/lib/narrationControl";
+import { useNarrationAutoScroll } from "@/lib/useNarrationAutoScroll";
+import { NARRATION_DOCK_THEMES } from "@/lib/narrationDock";
 
 if (typeof window !== "undefined") gsap.registerPlugin(ScrollTrigger);
 
@@ -76,6 +79,7 @@ export default function CaseStudyTemplate({
   theme = "light",
 }: CaseStudyTemplateProps) {
   const containerRef = useRef<HTMLDivElement>(null);
+  useNarrationAutoScroll(containerRef, ".case-study-section");
   const isDark = theme !== "light";
   const { label, accent, border, glow } = THEME_CONFIG[theme];
 
@@ -139,7 +143,7 @@ export default function CaseStudyTemplate({
           if (!isNarrationPaused()) {
             audio.play().catch(() => {
               // Autoplay can be blocked before the user has interacted with the page —
-              // the visible <audio> controls still let them start it manually.
+              // scrolling the section back into view tries again.
             });
           }
           currentAudio = audio;
@@ -197,16 +201,20 @@ export default function CaseStudyTemplate({
   }, [sections, theme]);
 
   return (
-    <div ref={containerRef} className={isDark ? "relative text-white" : "bg-white text-neutral-900"}>
-      <NarrationMasterControl />
+    <div
+      ref={containerRef}
+      className={theme === "lunar" ? "relative bg-black text-white" : isDark ? "relative text-white" : "bg-white text-neutral-900"}
+    >
+      <NarrationMasterControl theme={NARRATION_DOCK_THEMES[theme]} />
       {theme === "space" && <ASMRBackground />}
-      {theme === "lunar" && <LunarBackground />}
       {theme === "airlock" ? (
         <AirlockHero title={title} />
+      ) : theme === "lunar" ? (
+        <LunarHero title={title} description={lunarHeroDescription(sections[0]?.body)} />
       ) : (
         <header className="relative px-10 pb-16 pt-24">
           {label && <span className={`text-xs font-light uppercase tracking-[0.4em] ${accent}`}>{label}</span>}
-          <h1 className={`max-w-3xl text-4xl font-medium leading-tight md:text-5xl ${isDark ? "mt-4" : ""}`}>
+          <h1 className={`max-w-3xl text-2xl font-medium leading-tight md:text-[1.75rem] ${isDark ? "mt-4" : ""}`}>
             {title}
           </h1>
         </header>
@@ -257,10 +265,10 @@ export default function CaseStudyTemplate({
               <span className={`text-xs font-medium uppercase tracking-wide ${accent}`}>
                 {section.sectionLabel}
               </span>
-              <h2 className="text-2xl font-medium md:text-3xl">{section.title}</h2>
+              <h2 className="text-base font-medium md:text-lg">{section.title}</h2>
               <p
-                className="font-medium leading-[1.15] tracking-tight"
-                style={{ fontSize: isDark ? "clamp(1.5rem, 3.2vw, 3rem)" : "clamp(1.75rem, 4.6vw, 5rem)" }}
+                className="font-medium leading-normal tracking-tight"
+                style={{ fontSize: "clamp(0.9375rem, 1.25vw, 1.125rem)" }}
               >
                 {words.map((word, i) => (
                   <span
@@ -272,8 +280,7 @@ export default function CaseStudyTemplate({
                 ))}
               </p>
               {audioUrl && (
-                // eslint-disable-next-line jsx-a11y/media-has-caption
-                <audio controls src={audioUrl} className="mt-2 h-9 max-w-sm" />
+                <audio src={audioUrl} />
               )}
             </div>
           </section>

@@ -6,6 +6,9 @@ import { ScrollTrigger } from "gsap/ScrollTrigger";
 import { avatarForIndex, type TemplateProps } from "./types";
 import { AvatarDisplay } from "./AvatarDisplay";
 import { NarrationMasterControl } from "@/components/ui/NarrationMasterControl";
+import { NARRATION_DOCK_THEMES } from "@/lib/narrationDock";
+import { isNarrationPaused } from "@/lib/narrationControl";
+import { useNarrationAutoScroll } from "@/lib/useNarrationAutoScroll";
 
 if (typeof window !== "undefined") gsap.registerPlugin(ScrollTrigger);
 
@@ -13,10 +16,37 @@ const PALETTE = ["#0b0d12", "#151822", "#1a1024", "#101a17", "#1c1410"];
 
 export default function CinematicTemplate({ title, chunks, avatars }: TemplateProps) {
   const containerRef = useRef<HTMLDivElement>(null);
+  useNarrationAutoScroll(containerRef, ".cinematic-section");
 
   useEffect(() => {
     const ctx = gsap.context(() => {
+      let currentAudio: HTMLAudioElement | null = null;
+
+      function activateSection(audio: HTMLAudioElement) {
+        if (currentAudio && currentAudio !== audio) currentAudio.pause();
+        audio.currentTime = 0;
+        if (!isNarrationPaused()) {
+          audio.play().catch(() => {
+            // Autoplay can be blocked before the user has interacted with the page —
+            // scrolling the section back into view tries again.
+          });
+        }
+        currentAudio = audio;
+      }
+
       gsap.utils.toArray<HTMLElement>(".cinematic-section").forEach((section) => {
+        const audio = section.querySelector<HTMLAudioElement>("audio");
+        if (audio) {
+          ScrollTrigger.create({
+            trigger: section,
+            start: "top center",
+            end: "bottom center",
+            onEnter: () => activateSection(audio),
+            onEnterBack: () => activateSection(audio),
+            onLeave: () => audio.pause(),
+            onLeaveBack: () => audio.pause(),
+          });
+        }
         const content = section.querySelector(".cinematic-content");
         gsap.fromTo(
           content,
@@ -39,16 +69,11 @@ export default function CinematicTemplate({ title, chunks, avatars }: TemplatePr
     return () => ctx.revert();
   }, [chunks]);
 
-  function togglePlay(el: HTMLAudioElement) {
-    if (el.paused) el.play();
-    else el.pause();
-  }
-
   return (
     <div ref={containerRef} className="text-white">
-      <NarrationMasterControl />
+      <NarrationMasterControl theme={NARRATION_DOCK_THEMES.cinematic} />
       <div className="flex h-screen flex-col items-center justify-center px-6" style={{ background: PALETTE[0] }}>
-        <h1 className="max-w-2xl text-center text-4xl font-medium leading-tight">{title}</h1>
+        <h1 className="max-w-2xl text-center text-2xl font-medium leading-tight">{title}</h1>
         <p className="mt-4 text-sm uppercase tracking-widest text-white/50">Scroll to begin</p>
       </div>
 
@@ -72,28 +97,11 @@ export default function CinematicTemplate({ title, chunks, avatars }: TemplatePr
               <span className="text-xs uppercase tracking-widest text-white/40">
                 Chunk {chunk.order} of {chunks.length}
               </span>
-              <h2 className="max-w-xl text-2xl font-medium">{chunk.title}</h2>
-              <p className="max-w-lg text-lg leading-relaxed text-white/70">{chunk.narrativeText}</p>
+              <h2 className="max-w-xl text-lg font-medium">{chunk.title}</h2>
+              <p className="max-w-lg text-[0.9375rem] leading-relaxed text-white/70">{chunk.narrativeText}</p>
 
               {chunk.audioUrl && (
-                <>
-                  <audio
-                    id={`cinematic-audio-${chunk.id}`}
-                    src={chunk.audioUrl}
-                    onEnded={(e) => e.currentTarget.currentTime && (e.currentTarget.currentTime = 0)}
-                  />
-                  <button
-                    type="button"
-                    onClick={(e) => {
-                      const audio = document.getElementById(`cinematic-audio-${chunk.id}`) as HTMLAudioElement | null;
-                      if (audio) togglePlay(audio);
-                      e.currentTarget.blur();
-                    }}
-                    className="rounded-full border border-white/20 px-5 py-2 text-sm font-medium text-white hover:bg-white/10"
-                  >
-                    ▶ Play narration
-                  </button>
-                </>
+                <audio src={chunk.audioUrl} />
               )}
             </div>
           </section>

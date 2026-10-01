@@ -1,15 +1,66 @@
 "use client";
 
 import Link from "next/link";
-import { use, useEffect, useRef, useState } from "react";
-import type { Chunk, Project } from "@/lib/types";
+import { use, useCallback, useEffect, useRef, useState } from "react";
+import { documentTypeLabel, type Chunk, type Project } from "@/lib/types";
 import { AVATARS } from "@/lib/avatars";
 import { TEMPLATES } from "@/lib/templates";
 import { SpaceBackdrop } from "@/components/SpaceBackdrop";
 import { AudioPlayer } from "@/components/AudioPlayer";
 import { LoadingBar } from "@/components/LoadingBar";
-import { flattenCaseStudySections } from "@/lib/caseStudySections";
+import { flattenCaseStudySections, type CaseStudySectionEdit } from "@/lib/caseStudySections";
 import { readNdjsonStream } from "@/lib/readNdjsonStream";
+import { PublishDialog } from "@/components/PublishDialog";
+import { PublishStateBadge } from "@/components/PublishStateBadge";
+import { formatDate, type ProjectSummary } from "@/lib/projects";
+import {
+  chunkNarrationState,
+  getPublishState,
+  plural,
+  sectionNarrationState,
+  summarizeNarration,
+  type NarrationState,
+} from "@/lib/contentVersion";
+import { CASE_STUDY_TEMPLATE_CONTRACT } from "@/lib/agent/caseStudyTemplateContract";
+
+/** maxChars of a slot field from the case-study contract, when the contract defines one. */
+function contractMaxChars(slotId: string, field: string): number | undefined {
+  const slot = (CASE_STUDY_TEMPLATE_CONTRACT.slots as readonly { id: string; fields: readonly { name: string; maxChars: number }[] }[]).find(
+    (entry) => entry.id === slotId
+  );
+  return slot?.fields.find((entry) => entry.name === field)?.maxChars;
+}
+
+const NARRATION_BADGE: Record<Exclude<NarrationState, "ok">, { label: string; className: string }> = {
+  outdated: {
+    label: "Narration outdated",
+    className: "bg-amber-100 text-amber-800 dark:bg-amber-400/15 dark:text-amber-200",
+  },
+  missing: {
+    label: "No narration",
+    className: "bg-neutral-100 text-neutral-600 dark:bg-white/10 dark:text-neutral-300",
+  },
+};
+
+function NarrationBadge({ state }: { state: NarrationState }) {
+  if (state === "ok") return null;
+  const badge = NARRATION_BADGE[state];
+  return <span className={`rounded-full px-2 py-0.5 text-[11px] font-medium ${badge.className}`}>{badge.label}</span>;
+}
+
+function CharCount({ value, max }: { value: string; max?: number }) {
+  if (!max) return null;
+  const over = value.length > max;
+  return (
+    <span className={`text-[11px] ${over ? "font-medium text-amber-700 dark:text-amber-300" : "text-neutral-400 dark:text-indigo-200/40"}`}>
+      {value.length}/{max}
+      {over ? " · longer than the layout is designed for" : ""}
+    </span>
+  );
+}
+
+const iconButton =
+  "flex h-7 min-w-7 items-center justify-center rounded-full border border-neutral-200 bg-neutral-50 px-2 text-xs text-neutral-600 transition-colors hover:bg-neutral-100 disabled:opacity-30 dark:border-white/10 dark:bg-white/5 dark:text-indigo-100 dark:hover:bg-white/10";
 
 interface Voice {
   name: string;
@@ -31,7 +82,18 @@ function formatBoundAt(iso: string): string {
 
 export default function ProjectPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
-  const [project, setProject] = useState<Project | null>(null);
+  const [project, setProjectState] = useState<ProjectSummary | null>(null);
+  // Server responses from routes that don't return timestamps keep the ones we have.
+  const setProject = useCallback((next: Project | ProjectSummary) => {
+    setProjectState((current) => ({
+      ...next,
+      updatedAt: (next as ProjectSummary).updatedAt ?? new Date().toISOString(),
+      publishedAt: (next as ProjectSummary).publishedAt ?? next.publication?.publishedAt ?? current?.publishedAt,
+    }));
+  }, []);
+  const [editedTitle, setEditedTitle] = useState("");
+  const [sectionDrafts, setSectionDrafts] = useState<Record<string, { title?: string; body?: string }>>({});
+  const [copiedUrl, setCopiedUrl] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [voices, setVoices] = useState<Voice[] | null>(null);
   const [voicesError, setVoicesError] = useState<string | null>(null);
@@ -44,8 +106,7 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
   const [selectedTemplateId, setSelectedTemplateId] = useState<string>("");
   const [savingSelection, setSavingSelection] = useState(false);
   const [selectionError, setSelectionError] = useState<string | null>(null);
-  const [publishing, setPublishing] = useState(false);
-  const [publishError, setPublishError] = useState<string | null>(null);
+  const [publishDialogOpen, setPublishDialogOpen] = useState(false);
   const [previewingVoice, setPreviewingVoice] = useState(false);
   const [previewError, setPreviewError] = useState<string | null>(null);
   const previewAudioRef = useRef<HTMLAudioElement | null>(null);
@@ -73,19 +134,43 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
     total: number;
   } | null>(null);
 
+  // A server update that only added narration (generate-audio, or the publish
+  // dialog generating missing audio) must reach the chunk editor too; otherwise
+  // a later "Save changes" writes the stale chunks back and drops the new
+  // audioUrls. Unsaved text edits are kept: only the audio fields are copied.
+  const applyServerProject = useCallback((next: Project) => {
+    setProject(next);
+    const audioById = new Map(next.chunks.map((chunk) => [chunk.id, chunk]));
+    setEditedChunks((current) =>
+      current.map((chunk) => {
+        const fresh = audioById.get(chunk.id);
+        return fresh
+          ? {
+              ...chunk,
+              audioUrl: fresh.audioUrl,
+              audioDurationSec: fresh.audioDurationSec,
+              audioVoice: fresh.audioVoice,
+              narrationOutdated: fresh.narrationOutdated,
+            }
+          : chunk;
+      })
+    );
+  }, [setProject]);
+
   useEffect(() => {
     fetch(`/api/projects/${id}`)
       .then((res) => res.json())
       .then((data) => {
         if (data.error) throw new Error(data.error);
         setProject(data.project);
+        setEditedTitle(data.project.title);
         setEditedChunks(data.project.chunks);
         if (data.project.selectedVoice) setSelectedVoice(data.project.selectedVoice);
         if (data.project.selectedAvatarIds) setSelectedAvatarIds(data.project.selectedAvatarIds);
         if (data.project.selectedTemplateId) setSelectedTemplateId(data.project.selectedTemplateId);
       })
       .catch((err) => setError(err instanceof Error ? err.message : "Failed to load project."));
-  }, [id]);
+  }, [id, setProject]);
 
   useEffect(() => {
     fetch("/api/voices")
@@ -161,11 +246,14 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
 
     measure();
     pane.addEventListener("wheel", handleWheel, { passive: false });
-    window.addEventListener("resize", measure);
+    // The pane also resizes without a window resize (e.g. the "Unsaved
+    // changes" bar or an error message appearing beside it), so observe it.
+    const resizeObserver = new ResizeObserver(measure);
+    resizeObserver.observe(pane);
     return () => {
       if (gestureEndTimer !== null) window.clearTimeout(gestureEndTimer);
       pane.removeEventListener("wheel", handleWheel);
-      window.removeEventListener("resize", measure);
+      resizeObserver.disconnect();
     };
   }, [editedChunks.length]);
 
@@ -195,7 +283,7 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
           | { type: "error"; message: string };
         if (msg.type === "progress") setAudioProgress({ completed: msg.completed, total: msg.total });
         else if (msg.type === "done") {
-          setProject(msg.project);
+          applyServerProject(msg.project);
           failures = msg.failures;
         } else if (msg.type === "error") throw new Error(msg.message);
       });
@@ -240,7 +328,7 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
     }
   }
 
-  async function saveSelection(next: { avatarIds?: string[]; templateId?: string }) {
+  async function saveSelection(next: { avatarIds?: string[]; templateId?: string; voice?: string }) {
     setSavingSelection(true);
     setSelectionError(null);
     try {
@@ -250,11 +338,13 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
         body: JSON.stringify({
           selectedAvatarIds: next.avatarIds,
           selectedTemplateId: next.templateId,
+          selectedVoice: next.voice,
         }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Failed to save selection.");
-      setProject(data.project);
+      // Only selection/audio-voice fields change here; keep unsaved text edits.
+      applyServerProject(data.project);
     } catch (err) {
       setSelectionError(err instanceof Error ? err.message : "Failed to save selection.");
     } finally {
@@ -275,6 +365,11 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
     saveSelection({ templateId });
   }
 
+  function selectVoice(voice: string) {
+    setSelectedVoice(voice);
+    saveSelection({ voice });
+  }
+
   function editChunkField(chunkId: string, field: "title" | "narrativeText", value: string) {
     setEditedChunks((current) =>
       current.map((chunk) => (chunk.id === chunkId ? { ...chunk, [field]: value } : chunk))
@@ -282,24 +377,126 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
     setChunksDirty(true);
   }
 
-  async function handleSaveChunks() {
+  function renumber(chunks: Chunk[]): Chunk[] {
+    return chunks.map((chunk, index) => ({ ...chunk, order: index + 1 }));
+  }
+
+  function moveChunk(index: number, direction: -1 | 1) {
+    const target = index + direction;
+    if (target < 0 || target >= editedChunks.length) return;
+    const next = [...editedChunks];
+    [next[index], next[target]] = [next[target], next[index]];
+    setEditedChunks(renumber(next));
+    setActiveChunkIndex(target);
+    setChunksDirty(true);
+  }
+
+  /** New empty chapter after `index`; a case-study chapter joins the same phase as its neighbour. */
+  function addChunkAfter(index: number) {
+    const neighbour = editedChunks[index];
+    const chunk: Chunk = {
+      id: crypto.randomUUID(),
+      order: index + 2,
+      title: "",
+      narrativeText: "",
+      userEdited: true,
+      ...(neighbour?.phase ? { phase: neighbour.phase } : {}),
+      ...(neighbour?.emotion ? { emotion: neighbour.emotion } : {}),
+    };
+    const next = [...editedChunks.slice(0, index + 1), chunk, ...editedChunks.slice(index + 1)];
+    setEditedChunks(renumber(next));
+    setActiveChunkIndex(index + 1);
+    setChunksDirty(true);
+  }
+
+  function deleteChunk(index: number) {
+    if (editedChunks.length <= 1) return;
+    setEditedChunks(renumber(editedChunks.filter((_, i) => i !== index)));
+    setActiveChunkIndex(Math.max(0, Math.min(index, editedChunks.length - 2)));
+    setChunksDirty(true);
+  }
+
+  function editSection(key: string, field: "title" | "body", value: string) {
+    setSectionDrafts((current) => ({ ...current, [key]: { ...current[key], [field]: value } }));
+  }
+
+  // Section edits that actually differ from the saved text.
+  const savedSections = project?.caseStudyBinding?.slots ? flattenCaseStudySections(project.caseStudyBinding.slots) : [];
+  const sectionEdits: CaseStudySectionEdit[] = savedSections.flatMap((section) => {
+    const draft = sectionDrafts[section.key];
+    if (!draft) return [];
+    const edit: CaseStudySectionEdit = { key: section.key };
+    if (draft.body !== undefined && draft.body !== section.body) edit.body = draft.body;
+    if (draft.title !== undefined && draft.title !== section.title) edit.title = draft.title;
+    return edit.body !== undefined || edit.title !== undefined ? [edit] : [];
+  });
+  const titleDirty = Boolean(project) && editedTitle.trim() !== "" && editedTitle.trim() !== project?.title;
+  const hasUnsavedChanges = chunksDirty || titleDirty || sectionEdits.length > 0;
+  const emptyChunk = editedChunks.find((chunk) => !chunk.title.trim() || !chunk.narrativeText.trim());
+
+  function discardChanges() {
+    if (!project) return;
+    setEditedChunks(project.chunks);
+    setEditedTitle(project.title);
+    setSectionDrafts({});
+    setChunksDirty(false);
+    setChunksSaveError(null);
+    setActiveChunkIndex((current) => Math.min(current, project.chunks.length - 1));
+  }
+
+  /** Saves every pending edit (chapters, title, case-study sections) in one PATCH. */
+  async function handleSaveChanges(): Promise<boolean> {
+    if (!hasUnsavedChanges) return true;
+    if (chunksDirty && emptyChunk) {
+      setChunksSaveError(`Chapter ${emptyChunk.order} needs a title and narration text before saving.`);
+      setActiveChunkIndex(editedChunks.indexOf(emptyChunk));
+      return false;
+    }
+    if (sectionEdits.some((edit) => edit.body !== undefined && !edit.body.trim())) {
+      setChunksSaveError("A case-study section's text can't be empty.");
+      return false;
+    }
     setSavingChunks(true);
     setChunksSaveError(null);
     try {
       const res = await fetch(`/api/projects/${id}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ chunks: editedChunks }),
+        body: JSON.stringify({
+          ...(chunksDirty ? { chunks: editedChunks } : {}),
+          ...(titleDirty ? { title: editedTitle.trim() } : {}),
+          ...(sectionEdits.length > 0 ? { sectionEdits } : {}),
+        }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Failed to save changes.");
       setProject(data.project);
       setEditedChunks(data.project.chunks);
+      setEditedTitle(data.project.title);
+      setSectionDrafts({});
       setChunksDirty(false);
+      return true;
     } catch (err) {
       setChunksSaveError(err instanceof Error ? err.message : "Failed to save changes.");
+      return false;
     } finally {
       setSavingChunks(false);
+    }
+  }
+
+  /** Publishing always publishes what's saved, so pending edits are saved first. */
+  async function openPublishDialog() {
+    if (hasUnsavedChanges && !(await handleSaveChanges())) return;
+    setPublishDialogOpen(true);
+  }
+
+  async function copyPublishedUrl(url: string) {
+    try {
+      await navigator.clipboard.writeText(url);
+      setCopiedUrl(true);
+      window.setTimeout(() => setCopiedUrl(false), 2000);
+    } catch {
+      setCopiedUrl(false);
     }
   }
 
@@ -339,20 +536,6 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
     }
   }
 
-  async function handlePublish() {
-    setPublishing(true);
-    setPublishError(null);
-    try {
-      const res = await fetch(`/api/projects/${id}/publish`, { method: "POST" });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "Failed to publish.");
-      setProject(data.project);
-    } catch (err) {
-      setPublishError(err instanceof Error ? err.message : "Failed to publish.");
-    } finally {
-      setPublishing(false);
-    }
-  }
 
   async function handleBindCaseStudy() {
     setBinding(true);
@@ -362,6 +545,7 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Failed to generate case study layout.");
       setProject(data.project);
+      setSectionDrafts({});
     } catch (err) {
       setBindingError(err instanceof Error ? err.message : "Failed to generate case study layout.");
     } finally {
@@ -369,7 +553,8 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
     }
   }
 
-  async function handleGenerateCaseStudyAudio() {
+  /** Every section by default; `sectionKeys` limits it to those (missing/outdated ones). */
+  async function handleGenerateCaseStudyAudio(sectionKeys?: string[]) {
     if (!selectedVoice) return;
     setGeneratingCaseStudyAudio(true);
     setCaseStudyAudioError(null);
@@ -378,7 +563,9 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
       const res = await fetch(`/api/projects/${id}/generate-case-study-audio`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ voice: selectedVoice }),
+        body: JSON.stringify(
+          sectionKeys ? { voice: selectedVoice, sectionKeys, onlyMissing: true } : { voice: selectedVoice }
+        ),
       });
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
@@ -393,7 +580,7 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
           | { type: "error"; message: string };
         if (msg.type === "progress") setCaseStudyAudioProgress({ completed: msg.completed, total: msg.total });
         else if (msg.type === "done") {
-          setProject(msg.project);
+          applyServerProject(msg.project);
           failures = msg.failures;
         } else if (msg.type === "error") throw new Error(msg.message);
       });
@@ -457,44 +644,83 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
   // they don't need a template selection to be publish-ready — just an
   // avatar and a generated layout (checked separately, in the Publish button).
   const readyToPreview = selectedAvatarIds.length > 0 && (isCaseStudyProject || Boolean(selectedTemplateId));
+  const readyToPublish = readyToPreview && (!isCaseStudyProject || Boolean(project?.caseStudyBinding?.slots));
+  const publishState = project ? getPublishState(project) : "draft";
+  // Narration of what the published site plays, against the voice now selected.
+  const narrationSummary = project
+    ? summarizeNarration(project, selectedVoice || undefined)
+    : { kind: "chunks" as const, total: 0, needed: [], missing: 0, outdated: 0 };
+  const publishedChunkIds = new Set(project?.chunks.map((chunk) => chunk.id) ?? []);
 
   return (
     <>
       <SpaceBackdrop />
-      <main className="flex w-full flex-col text-neutral-900 dark:text-white lg:h-screen lg:overflow-hidden">
-        <div className="flex w-full flex-col gap-6 px-6 pt-8 pb-4 lg:px-12 lg:shrink-0">
-      <Link href="/" className="text-lg text-neutral-500 hover:text-neutral-800 dark:text-indigo-200/60 dark:hover:text-indigo-100">
+      {/* Viewport-height two-pane layout, but never shorter than 680px: on a
+          short screen (laptop, browser zoom) the panes would otherwise squeeze
+          until the chunk card's textarea and buttons are clipped — and the
+          chunk pane's wheel handler means the card can't be scrolled to reach
+          them. Below that height the page scrolls instead. */}
+      <main className="flex w-full flex-col text-neutral-900 dark:text-white lg:h-screen lg:min-h-[680px]">
+        <div className="flex w-full flex-col gap-2 pl-4 pr-4 pt-5 pb-3 sm:pl-6 sm:pr-6 lg:pl-8 lg:pr-44 lg:shrink-0">
+      <Link href="/" className="self-start text-sm text-neutral-500 transition-colors hover:text-neutral-800 dark:text-indigo-200/60 dark:hover:text-indigo-100">
         ← All stories
       </Link>
 
-      {error && <p className="text-lg text-red-600 dark:text-red-400">{error}</p>}
-      {!error && !project && <p className="text-lg text-neutral-500 dark:text-indigo-200/60">Loading…</p>}
+      {error && <p className="text-sm text-red-600 dark:text-red-400">{error}</p>}
+      {!error && !project && <p className="text-sm text-neutral-500 dark:text-indigo-200/60">Loading…</p>}
 
       {project && (
-          <header>
-            <h1 className="text-4xl font-semibold tracking-tight md:text-5xl">{project.title}</h1>
-            <p className="mt-2 text-lg text-neutral-500 dark:text-indigo-200/60">
-              {project.chunks.length} chunks · {project.documentType}
+          <header className="mt-3 flex flex-col gap-2 lg:mt-0">
+            <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+              <h1 className="min-w-0 break-words text-xl font-semibold tracking-tight md:text-2xl">{project.title}</h1>
+              <PublishStateBadge state={publishState} />
+            </div>
+            <p className="text-xs text-neutral-500 dark:text-indigo-200/60 md:text-sm">
+              {plural(project.chunks.length, "chapter")} · {documentTypeLabel(project.documentType)}
               {project.sourceFileName ? ` · from ${project.sourceFileName}` : ""}
+              {` · created ${formatDate(project.createdAt)}`}
+              {project.publishedAt ? ` · last published ${formatDate(project.publishedAt)}` : ""}
             </p>
+            {publishState === "changed" && (
+              <div className="flex flex-col gap-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900 dark:border-amber-400/30 dark:bg-amber-400/10 dark:text-amber-100 sm:flex-row sm:items-center sm:justify-between">
+                <span>
+                  Saved changes aren&apos;t live yet.
+                  {narrationSummary.outdated > 0 &&
+                    ` Narration needs updating for ${plural(narrationSummary.outdated, "chapter")}; it's regenerated when you publish.`}
+                </span>
+                <button
+                  type="button"
+                  onClick={openPublishDialog}
+                  disabled={!readyToPublish || savingChunks}
+                  aria-haspopup="dialog"
+                  className="shrink-0 self-start rounded-full bg-emerald-500 px-4 py-1.5 text-sm font-semibold text-neutral-950 shadow-[0_0_24px_rgba(16,185,129,0.4)] transition hover:brightness-110 active:scale-[0.98] disabled:opacity-40 sm:self-auto"
+                >
+                  Publish update
+                </button>
+              </div>
+            )}
           </header>
       )}
         </div>
 
         {project && (
-          <div className="flex min-h-0 w-full flex-col gap-8 px-6 pb-8 lg:flex-1 lg:flex-row lg:gap-16 lg:overflow-hidden lg:px-12">
-          <div className="flex flex-col gap-8 lg:w-1/2 lg:overflow-y-auto lg:pr-2">
+          <div
+            className={`flex min-h-0 w-full flex-col gap-5 px-4 sm:px-6 lg:flex-1 lg:flex-row lg:gap-6 lg:overflow-hidden lg:px-8 ${
+              hasUnsavedChanges ? "pb-24" : "pb-5"
+            }`}
+          >
+          <div className="thin-scroll flex flex-col gap-4 lg:w-[44%] lg:overflow-y-auto lg:pr-2">
 
-          <section className="flex flex-col gap-5 rounded-3xl border border-neutral-200 bg-white p-8 shadow-sm dark:border-white/10 dark:bg-white/[0.03] dark:shadow-[0_0_50px_rgba(99,102,241,0.06)] dark:backdrop-blur-sm">
-            <label className="text-2xl font-medium text-neutral-800 dark:text-indigo-100">Voice</label>
-            {voicesError && <p className="text-base text-red-600 dark:text-red-400">{voicesError}</p>}
+          <section className="flex flex-col gap-3 rounded-2xl border border-neutral-200 bg-white p-5 shadow-sm dark:border-white/10 dark:bg-white/[0.03] dark:shadow-[0_0_50px_rgba(99,102,241,0.06)] dark:backdrop-blur-sm">
+            <label className="text-sm font-semibold text-neutral-800 dark:text-indigo-100">Voice</label>
+            {voicesError && <p className="text-xs text-red-600 dark:text-red-400">{voicesError}</p>}
             <div className="flex flex-wrap items-center gap-3">
               <div className="relative w-full sm:w-auto">
                 <select
                   value={selectedVoice}
-                  onChange={(event) => setSelectedVoice(event.target.value)}
-                  disabled={!voices || isBusy}
-                  className="w-full appearance-none rounded-full border border-neutral-200 bg-neutral-50 py-2.5 pl-5 pr-11 text-[13px] text-neutral-900 focus:border-violet-400 focus:outline-none disabled:opacity-60 dark:border-white/10 dark:bg-black/30 dark:text-white dark:focus:border-violet-400/60"
+                  onChange={(event) => selectVoice(event.target.value)}
+                  disabled={!voices || isBusy || savingSelection}
+                  className="w-full appearance-none rounded-full border border-neutral-200 bg-neutral-50 py-2 pl-4 pr-10 text-xs text-neutral-900 focus:border-violet-400 focus:outline-none disabled:opacity-60 dark:border-white/10 dark:bg-black/30 dark:text-white dark:focus:border-violet-400/60"
                 >
                   {!voices && <option>Loading voices…</option>}
                   {voices?.map((voice) => (
@@ -515,20 +741,39 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
                 type="button"
                 onClick={handlePreviewVoice}
                 disabled={!selectedVoice || previewingVoice}
-                className="rounded-full border border-neutral-200 bg-neutral-50 px-5 py-2.5 text-[13px] font-medium text-neutral-700 transition-colors hover:bg-neutral-100 disabled:opacity-30 dark:border-white/10 dark:bg-white/5 dark:text-indigo-100 dark:hover:bg-white/10"
+                className="rounded-full border border-neutral-200 bg-neutral-50 px-4 py-2 text-xs font-medium text-neutral-700 transition-colors active:scale-[0.98] hover:bg-neutral-100 disabled:opacity-30 dark:border-white/10 dark:bg-white/5 dark:text-indigo-100 dark:hover:bg-white/10"
               >
                 {previewingVoice ? "Loading preview…" : "▶ Preview voice"}
               </button>
               <button
                 type="button"
                 onClick={() => generateAudio()}
-                disabled={!selectedVoice || isBusy}
-                className="rounded-full bg-gradient-to-r from-violet-500 to-cyan-400 px-5 py-2.5 text-[13px] font-semibold text-neutral-950 shadow-[0_0_24px_rgba(139,92,246,0.4)] disabled:opacity-30"
+                disabled={!selectedVoice || isBusy || chunksDirty}
+                className="rounded-full bg-gradient-to-r from-violet-500 to-cyan-400 px-4 py-2 text-xs font-semibold text-neutral-950 transition hover:brightness-110 active:scale-[0.98] shadow-[0_0_24px_rgba(139,92,246,0.4)] disabled:opacity-30"
               >
-                {generatingAll ? "Generating all…" : "Generate audio for all chunks"}
+                {generatingAll ? "Generating all…" : "Generate audio for all chapters"}
               </button>
             </div>
-            {previewError && <p className="text-base text-red-600 dark:text-red-400">{previewError}</p>}
+            {!isCaseStudyProject && narrationSummary.needed.length > 0 && (
+              <div className="flex flex-wrap items-center gap-2 text-xs text-neutral-600 dark:text-indigo-200/70">
+                <span>
+                  {narrationSummary.outdated > 0 && `Narration needs updating for ${plural(narrationSummary.outdated, "chapter")}. `}
+                  {narrationSummary.missing > 0 && `${plural(narrationSummary.missing, "chapter")} without narration.`}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => generateAudio(narrationSummary.needed)}
+                  disabled={!selectedVoice || isBusy || chunksDirty}
+                  className="rounded-full border border-neutral-200 bg-neutral-50 px-3 py-1 font-medium text-neutral-700 hover:bg-neutral-100 disabled:opacity-30 dark:border-white/10 dark:bg-white/5 dark:text-indigo-100 dark:hover:bg-white/10"
+                >
+                  Update these now
+                </button>
+              </div>
+            )}
+            {chunksDirty && (
+              <p className="text-xs text-neutral-500 dark:text-indigo-200/60">Save your chapter changes before generating audio.</p>
+            )}
+            {previewError && <p className="text-xs text-red-600 dark:text-red-400">{previewError}</p>}
             {generatingAll && (
               <LoadingBar
                 label="Generating audio…"
@@ -536,15 +781,15 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
                 detail={audioProgress ? `${audioProgress.completed} / ${audioProgress.total} chunks` : undefined}
               />
             )}
-            {audioError && <p className="text-base text-red-600 dark:text-red-400">{audioError}</p>}
+            {audioError && <p className="text-xs text-red-600 dark:text-red-400">{audioError}</p>}
           </section>
 
-          <section className="flex flex-col gap-6 rounded-3xl border border-neutral-200 bg-white p-8 shadow-sm dark:border-white/10 dark:bg-white/[0.03] dark:shadow-[0_0_50px_rgba(99,102,241,0.06)] dark:backdrop-blur-sm">
+          <section className="flex flex-col gap-4 rounded-2xl border border-neutral-200 bg-white p-5 shadow-sm dark:border-white/10 dark:bg-white/[0.03] dark:shadow-[0_0_50px_rgba(99,102,241,0.06)] dark:backdrop-blur-sm">
             <div>
-              <label className="text-2xl font-medium text-neutral-800 dark:text-indigo-100">Avatar</label>
-              <p className="text-base text-neutral-500 dark:text-indigo-200/50">Pick one, or both to alternate per chunk.</p>
+              <label className="text-sm font-semibold text-neutral-800 dark:text-indigo-100">Avatar</label>
+              <p className="text-xs text-neutral-500 dark:text-indigo-200/50">Pick one, or both to alternate per chunk.</p>
             </div>
-            <div className="flex flex-wrap gap-4">
+            <div className="flex flex-wrap gap-2">
               {AVATARS.map((avatar) => {
                 const active = selectedAvatarIds.includes(avatar.id);
                 return (
@@ -553,24 +798,24 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
                     type="button"
                     onClick={() => toggleAvatar(avatar.id)}
                     disabled={savingSelection}
-                    className={`flex flex-col items-center gap-2 rounded-2xl border p-5 text-base font-medium transition-all disabled:opacity-30 ${
+                    className={`flex flex-col items-center gap-1 rounded-xl border px-4 py-2 text-xs font-medium transition-all hover:-translate-y-0.5 disabled:opacity-30 ${
                       active
                         ? "border-violet-400 bg-violet-50 shadow-[0_0_20px_rgba(139,92,246,0.2)] dark:border-violet-400/60 dark:bg-violet-500/10 dark:shadow-[0_0_24px_rgba(139,92,246,0.35)]"
                         : "border-neutral-200 bg-neutral-50 hover:bg-neutral-100 dark:border-white/10 dark:bg-white/5 dark:hover:bg-white/10"
                     }`}
                   >
                     {/* eslint-disable-next-line @next/next/no-img-element */}
-                    <img src={avatar.imageUrl} alt={avatar.name} className="h-24 w-24 object-contain" />
+                    <img src={avatar.imageUrl} alt={avatar.name} className="h-12 w-12 object-contain" />
                     <span className="text-neutral-700 dark:text-indigo-100">{avatar.name}</span>
                   </button>
                 );
               })}
             </div>
 
-            <div className="mt-2">
-              <label className="text-2xl font-medium text-neutral-800 dark:text-indigo-100">Template</label>
+            <div className="mt-1">
+              <label className="text-sm font-semibold text-neutral-800 dark:text-indigo-100">Template</label>
             </div>
-            <div className="flex flex-col gap-3">
+            <div className="grid grid-cols-2 gap-2 xl:grid-cols-3">
               {TEMPLATES.map((template) => {
                 const active = selectedTemplateId === template.id;
                 return (
@@ -579,80 +824,147 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
                     type="button"
                     onClick={() => selectTemplate(template.id)}
                     disabled={savingSelection}
-                    className={`rounded-2xl border p-5 text-left transition-all disabled:opacity-30 ${
+                    className={`rounded-xl border p-3 text-left transition-all hover:-translate-y-0.5 disabled:opacity-30 ${
                       active
                         ? "border-violet-400 bg-violet-50 shadow-[0_0_20px_rgba(139,92,246,0.2)] dark:border-violet-400/60 dark:bg-violet-500/10 dark:shadow-[0_0_24px_rgba(139,92,246,0.35)]"
                         : "border-neutral-200 bg-neutral-50 hover:bg-neutral-100 dark:border-white/10 dark:bg-white/5 dark:hover:bg-white/10"
                     }`}
                   >
-                    <p className="text-xl font-medium text-neutral-900 dark:text-white">{template.name}</p>
-                    <p className="text-base text-neutral-500 dark:text-indigo-200/50">{template.description}</p>
+                    <p className="text-sm font-medium text-neutral-900 dark:text-white">{template.name}</p>
+                    <p className="mt-0.5 line-clamp-2 text-xs text-neutral-500 dark:text-indigo-200/50">{template.description}</p>
                   </button>
                 );
               })}
             </div>
 
-            {selectionError && <p className="text-base text-red-600 dark:text-red-400">{selectionError}</p>}
+            {selectionError && <p className="text-xs text-red-600 dark:text-red-400">{selectionError}</p>}
+
+            {!readyToPreview && (
+              <p className="text-xs text-neutral-500 dark:text-indigo-200/60">
+                {selectedAvatarIds.length === 0 && !isCaseStudyProject && !selectedTemplateId
+                  ? "Select an avatar and a template to preview and publish the site."
+                  : selectedAvatarIds.length === 0
+                  ? "Select an avatar to preview and publish the site."
+                  : "Select a template to preview and publish the site."}
+              </p>
+            )}
 
             {readyToPreview && (
               <Link
                 href={`/projects/${id}/preview`}
                 target="_blank"
-                className="mt-2 self-start rounded-full bg-gradient-to-r from-violet-500 to-cyan-400 px-7 py-3.5 text-xl font-semibold text-neutral-950 shadow-[0_0_24px_rgba(139,92,246,0.4)]"
+                className="mt-1 self-start rounded-full bg-gradient-to-r from-violet-500 to-cyan-400 px-5 py-2 text-sm font-semibold text-neutral-950 transition hover:brightness-110 active:scale-[0.98] shadow-[0_0_24px_rgba(139,92,246,0.4)]"
               >
                 Preview site →
               </Link>
             )}
           </section>
 
-          {readyToPreview && (
-            <section className="flex flex-col gap-5 rounded-3xl border border-neutral-200 bg-white p-8 shadow-sm dark:border-white/10 dark:bg-white/[0.03] dark:shadow-[0_0_50px_rgba(16,185,129,0.05)] dark:backdrop-blur-sm">
-              <label className="text-2xl font-medium text-neutral-800 dark:text-indigo-100">Publish</label>
-              <div className="flex flex-wrap items-center gap-4">
+          {(readyToPreview || project.publishedUrl) && (
+            <section className="flex flex-col gap-3 rounded-2xl border border-neutral-200 bg-white p-5 shadow-sm dark:border-white/10 dark:bg-white/[0.03] dark:shadow-[0_0_50px_rgba(16,185,129,0.05)] dark:backdrop-blur-sm">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <label className="text-sm font-semibold text-neutral-800 dark:text-indigo-100">Publish</label>
+                <PublishStateBadge state={publishState} />
+              </div>
+              {project.publishedUrl && (
+                <div className="flex min-w-0 flex-wrap items-center gap-2 rounded-xl bg-neutral-50 px-3 py-2 dark:bg-black/20">
+                  <a
+                    href={project.publishedUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    title={project.publishedUrl}
+                    className="min-w-0 flex-1 truncate text-xs font-medium text-emerald-700 hover:underline dark:text-emerald-300"
+                  >
+                    {project.publishedUrl}
+                  </a>
+                  <button
+                    type="button"
+                    onClick={() => copyPublishedUrl(project.publishedUrl ?? "")}
+                    className="rounded-full border border-neutral-200 bg-white px-3 py-1 text-xs font-medium text-neutral-700 hover:bg-neutral-50 dark:border-white/10 dark:bg-white/5 dark:text-indigo-100 dark:hover:bg-white/10"
+                  >
+                    {copiedUrl ? "Copied" : "Copy"}
+                  </button>
+                  <a
+                    href={project.publishedUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="rounded-full border border-neutral-200 bg-white px-3 py-1 text-xs font-medium text-neutral-700 hover:bg-neutral-50 dark:border-white/10 dark:bg-white/5 dark:text-indigo-100 dark:hover:bg-white/10"
+                  >
+                    Open ↗
+                  </a>
+                </div>
+              )}
+              <div className="flex flex-wrap items-center gap-3">
                 <button
                   type="button"
-                  onClick={handlePublish}
-                  disabled={publishing || project.publishStatus === "publishing"}
-                  className="rounded-full bg-emerald-500 px-7 py-3.5 text-xl font-semibold text-neutral-950 shadow-[0_0_28px_rgba(16,185,129,0.45)] disabled:opacity-30"
+                  onClick={openPublishDialog}
+                  disabled={project.publishStatus === "publishing" || !readyToPublish || savingChunks}
+                  aria-haspopup="dialog"
+                  className="rounded-full bg-emerald-500 px-5 py-2 text-sm font-semibold text-neutral-950 transition hover:brightness-110 active:scale-[0.98] shadow-[0_0_28px_rgba(16,185,129,0.45)] disabled:opacity-30"
                 >
-                  {publishing || project.publishStatus === "publishing"
+                  {project.publishStatus === "publishing"
                     ? "Publishing…"
-                    : project.publishStatus === "published"
+                    : publishState === "changed" || (project.publishedUrl && hasUnsavedChanges)
+                    ? "Publish update"
+                    : project.publishedUrl
                     ? "Republish"
                     : "Publish"}
                 </button>
-                <span className="text-base font-medium text-neutral-500 dark:text-indigo-200/60">
-                  Status: {project.publishStatus}
-                </span>
+                {hasUnsavedChanges && (
+                  <span className="text-xs text-neutral-500 dark:text-indigo-200/60">Your unsaved edits are saved first.</span>
+                )}
               </div>
-              {project.publishStatus === "published" && project.publishedUrl && (
-                <a
-                  href={project.publishedUrl}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="text-lg text-emerald-700 hover:underline dark:text-emerald-300"
-                >
-                  {project.publishedUrl} ↗
-                </a>
+              {narrationSummary.needed.length > 0 && (
+                <p className="text-xs text-neutral-500 dark:text-indigo-200/60">
+                  {narrationSummary.outdated > 0
+                    ? `Narration needs updating for ${plural(narrationSummary.outdated, "chapter")}`
+                    : `${plural(narrationSummary.missing, "chapter")} without narration`}
+                  {narrationSummary.outdated > 0 && narrationSummary.missing > 0
+                    ? ` (and ${narrationSummary.missing} without)`
+                    : ""}
+                  . Publishing generates it first, only for these.
+                </p>
               )}
-              {publishError && <p className="text-base text-red-600 dark:text-red-400">{publishError}</p>}
+              {!readyToPublish && (
+                <p className="text-xs text-neutral-500 dark:text-indigo-200/60">
+                  {selectedAvatarIds.length === 0
+                    ? isCaseStudyProject
+                      ? "Select an avatar before publishing."
+                      : "Select an avatar and a template before publishing."
+                    : isCaseStudyProject
+                      ? "Generate the case study layout before publishing."
+                      : "Select a template before publishing."}
+                </p>
+              )}
+              {publishDialogOpen && (
+                <PublishDialog
+                  project={project}
+                  voice={selectedVoice}
+                  onClose={() => setPublishDialogOpen(false)}
+                  onProjectUpdate={applyServerProject}
+                />
+              )}
             </section>
           )}
 
           {project.documentType === "case-study" && (
-            <section className="flex flex-col gap-5 rounded-3xl border border-neutral-200 bg-white p-8 shadow-sm dark:border-white/10 dark:bg-white/[0.03] dark:shadow-[0_0_50px_rgba(99,102,241,0.06)] dark:backdrop-blur-sm">
+            <section className="flex flex-col gap-3 rounded-2xl border border-neutral-200 bg-white p-5 shadow-sm dark:border-white/10 dark:bg-white/[0.03] dark:shadow-[0_0_50px_rgba(99,102,241,0.06)] dark:backdrop-blur-sm">
               <div>
-                <label className="text-2xl font-medium text-neutral-800 dark:text-indigo-100">Case study layout</label>
-                <p className="text-base text-neutral-500 dark:text-indigo-200/50">
-                  Fits this storyline into the case-study page template (Company → Domain → Customer → Problem → Solution → Impact). This is what Publish uses for case-study projects.
+                <label className="text-sm font-semibold text-neutral-800 dark:text-indigo-100">Case study layout</label>
+                <p className="text-xs text-neutral-500 dark:text-indigo-200/50">
+                  Fits this storyline into the case-study page template
+                  {savedSections.length > 0
+                    ? ` (${Array.from(new Set(savedSections.map((section) => section.sectionLabel))).join(" → ")})`
+                    : ""}
+                  . This is what Publish uses for case-study projects.
                 </p>
               </div>
-              <div className="flex flex-wrap items-center gap-4">
+              <div className="flex flex-wrap items-center gap-3">
                 <button
                   type="button"
                   onClick={handleBindCaseStudy}
                   disabled={binding}
-                  className="rounded-full bg-gradient-to-r from-violet-500 to-cyan-400 px-7 py-3.5 text-xl font-semibold text-neutral-950 shadow-[0_0_24px_rgba(139,92,246,0.4)] disabled:opacity-30"
+                  className="rounded-full bg-gradient-to-r from-violet-500 to-cyan-400 px-5 py-2 text-sm font-semibold text-neutral-950 transition hover:brightness-110 active:scale-[0.98] shadow-[0_0_24px_rgba(139,92,246,0.4)] disabled:opacity-30"
                 >
                   {binding
                     ? "Generating layout…"
@@ -664,7 +976,7 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
                   <Link
                     href={`/projects/${id}/preview`}
                     target="_blank"
-                    className="text-lg text-violet-700 hover:underline dark:text-violet-300"
+                    className="text-sm text-violet-700 hover:underline dark:text-violet-300"
                   >
                     Preview layout →
                   </Link>
@@ -672,13 +984,21 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
               </div>
               {binding && <LoadingBar label="Generating case study layout…" />}
               {project.caseStudyBinding && (
-                <p className="text-base text-neutral-500 dark:text-indigo-200/60">
+                <p className="text-xs text-neutral-500 dark:text-indigo-200/60">
                   Bound {formatBoundAt(project.caseStudyBinding.boundAt)}
                   {project.caseStudyBinding.diagnostics.length > 0
                     ? ` · ${project.caseStudyBinding.diagnostics.length} diagnostic${
                         project.caseStudyBinding.diagnostics.length === 1 ? "" : "s"
                       } (unsupported/compressed slots — see below)`
                     : " · every slot filled within budget, nothing dropped"}
+                </p>
+              )}
+              {project.caseStudyBinding?.chunksChangedAt && (
+                <p className="rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900 dark:border-amber-400/30 dark:bg-amber-400/10 dark:text-amber-100">
+                  The chapters were edited on {formatDate(project.caseStudyBinding.chunksChangedAt, true)}, after this
+                  layout was generated. The published case study shows the section text below: edit it directly, or
+                  regenerate the layout to rebuild every section from the chapters (this replaces section edits and
+                  their narration).
                 </p>
               )}
               {project.caseStudyBinding?.slots &&
@@ -688,16 +1008,33 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
                     (section) => project.caseStudyBinding?.sectionAudio?.[section.key]
                   ).length;
                   return (
-                    <div className="flex flex-col gap-3 border-t border-neutral-100 pt-5 dark:border-white/10">
-                      <label className="text-xl font-medium text-neutral-800 dark:text-indigo-100">
+                    <div className="flex flex-col gap-2 border-t border-neutral-100 pt-4 dark:border-white/10">
+                      <label className="text-sm font-semibold text-neutral-800 dark:text-indigo-100">
                         Narration audio
                       </label>
-                      <div className="flex flex-wrap items-center gap-4">
+                      {narrationSummary.needed.length > 0 && (
+                        <div className="flex flex-wrap items-center gap-2 text-xs text-neutral-600 dark:text-indigo-200/70">
+                          <span>
+                            {narrationSummary.outdated > 0 &&
+                              `Narration needs updating for ${plural(narrationSummary.outdated, "section")}. `}
+                            {narrationSummary.missing > 0 && `${plural(narrationSummary.missing, "section")} without narration.`}
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => handleGenerateCaseStudyAudio(narrationSummary.needed)}
+                            disabled={!selectedVoice || generatingCaseStudyAudio || sectionEdits.length > 0}
+                            className="rounded-full border border-neutral-200 bg-neutral-50 px-3 py-1 font-medium text-neutral-700 hover:bg-neutral-100 disabled:opacity-30 dark:border-white/10 dark:bg-white/5 dark:text-indigo-100 dark:hover:bg-white/10"
+                          >
+                            Update these now
+                          </button>
+                        </div>
+                      )}
+                      <div className="flex flex-wrap items-center gap-3">
                         <button
                           type="button"
-                          onClick={handleGenerateCaseStudyAudio}
-                          disabled={!selectedVoice || generatingCaseStudyAudio}
-                          className="rounded-full bg-gradient-to-r from-violet-500 to-cyan-400 px-6 py-3 text-lg font-semibold text-neutral-950 shadow-[0_0_24px_rgba(139,92,246,0.4)] disabled:opacity-30"
+                          onClick={() => handleGenerateCaseStudyAudio()}
+                          disabled={!selectedVoice || generatingCaseStudyAudio || sectionEdits.length > 0}
+                          className="rounded-full bg-gradient-to-r from-violet-500 to-cyan-400 px-4 py-2 text-sm font-semibold text-neutral-950 transition hover:brightness-110 active:scale-[0.98] shadow-[0_0_24px_rgba(139,92,246,0.4)] disabled:opacity-30"
                         >
                           {generatingCaseStudyAudio
                             ? "Generating narration…"
@@ -705,7 +1042,7 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
                             ? "Regenerate narration audio"
                             : "Generate narration audio"}
                         </button>
-                        <span className="text-base font-medium text-neutral-500 dark:text-indigo-200/60">
+                        <span className="text-xs font-medium text-neutral-500 dark:text-indigo-200/60">
                           {narratedCount}/{sections.length} sections narrated
                         </span>
                       </div>
@@ -725,7 +1062,7 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
                         />
                       )}
                       {caseStudyAudioError && (
-                        <p className="text-base text-red-600 dark:text-red-400">{caseStudyAudioError}</p>
+                        <p className="text-xs text-red-600 dark:text-red-400">{caseStudyAudioError}</p>
                       )}
                     </div>
                   );
@@ -743,20 +1080,20 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
                   ).length;
                   const allNarrated = sections.length > 0 && narratedCount === sections.length;
                   return (
-                    <div className="flex flex-col gap-3 border-t border-neutral-100 pt-5 dark:border-white/10">
-                      <label className="text-xl font-medium text-neutral-800 dark:text-indigo-100">
+                    <div className="flex flex-col gap-2 border-t border-neutral-100 pt-4 dark:border-white/10">
+                      <label className="text-sm font-semibold text-neutral-800 dark:text-indigo-100">
                         Avatar video
                       </label>
-                      <p className="text-base text-neutral-500 dark:text-indigo-200/50">
+                      <p className="text-xs text-neutral-500 dark:text-indigo-200/50">
                         Lip-syncs Avatar 1&apos;s video to each section&apos;s narration audio (Lunar theme only).
                         {!allNarrated && " Generate narration audio for every section first."}
                       </p>
-                      <div className="flex flex-wrap items-center gap-4">
+                      <div className="flex flex-wrap items-center gap-3">
                         <button
                           type="button"
                           onClick={handleGenerateCaseStudyAvatarVideo}
                           disabled={!allNarrated || generatingCaseStudyAvatarVideo}
-                          className="rounded-full bg-gradient-to-r from-violet-500 to-cyan-400 px-6 py-3 text-lg font-semibold text-neutral-950 shadow-[0_0_24px_rgba(139,92,246,0.4)] disabled:opacity-30"
+                          className="rounded-full bg-gradient-to-r from-violet-500 to-cyan-400 px-4 py-2 text-sm font-semibold text-neutral-950 transition hover:brightness-110 active:scale-[0.98] shadow-[0_0_24px_rgba(139,92,246,0.4)] disabled:opacity-30"
                         >
                           {generatingCaseStudyAvatarVideo
                             ? "Generating avatar video…"
@@ -764,7 +1101,7 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
                             ? "Regenerate avatar video"
                             : "Generate avatar video"}
                         </button>
-                        <span className="text-base font-medium text-neutral-500 dark:text-indigo-200/60">
+                        <span className="text-xs font-medium text-neutral-500 dark:text-indigo-200/60">
                           {lipsyncedCount}/{sections.length} sections lip-synced
                         </span>
                       </div>
@@ -784,11 +1121,75 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
                         />
                       )}
                       {caseStudyAvatarVideoError && (
-                        <p className="text-base text-red-600 dark:text-red-400">{caseStudyAvatarVideoError}</p>
+                        <p className="text-xs text-red-600 dark:text-red-400">{caseStudyAvatarVideoError}</p>
                       )}
                     </div>
                   );
                 })()}
+              {project.caseStudyBinding && savedSections.length > 0 && (
+                <details className="group flex flex-col gap-3 border-t border-neutral-100 pt-4 dark:border-white/10">
+                  <summary className="flex cursor-pointer list-none items-center justify-between gap-2 text-sm font-semibold text-neutral-800 dark:text-indigo-100">
+                    <span>Edit section text ({savedSections.length})</span>
+                    <span className="text-xs font-normal text-neutral-500 transition-transform group-open:rotate-180 dark:text-indigo-200/60">▾</span>
+                  </summary>
+                  <p className="mt-2 text-xs text-neutral-500 dark:text-indigo-200/50">
+                    This is the text the published case study shows and narrates. Changing a section&apos;s text marks its
+                    narration as outdated; it&apos;s regenerated when you publish.
+                  </p>
+                  <div className="mt-3 flex flex-col gap-4">
+                    {savedSections.map((section) => {
+                      const draft = sectionDrafts[section.key];
+                      const titleValue = draft?.title ?? section.title;
+                      const bodyValue = draft?.body ?? section.body;
+                      const binding = project.caseStudyBinding!;
+                      const state = sectionNarrationState(binding, section.key, selectedVoice || undefined);
+                      const bodyChanged = draft?.body !== undefined && draft.body !== section.body;
+                      return (
+                        <div key={section.key} className="flex flex-col gap-1.5 rounded-xl border border-neutral-200 p-3 dark:border-white/10">
+                          <div className="flex flex-wrap items-center justify-between gap-2">
+                            <span className="text-xs font-semibold uppercase tracking-wide text-cyan-700 dark:text-cyan-300/70">
+                              {section.sectionLabel}
+                              {section.index !== null ? ` ${section.index + 1}` : ""}
+                            </span>
+                            {bodyChanged ? (
+                              <span className="rounded-full bg-violet-100 px-2 py-0.5 text-[11px] font-medium text-violet-700 dark:bg-violet-400/15 dark:text-violet-200">
+                                Unsaved · narration will need updating
+                              </span>
+                            ) : (
+                              <NarrationBadge state={state} />
+                            )}
+                          </div>
+                          {section.titleField && (
+                            <>
+                              <label className="sr-only" htmlFor={`section-title-${section.key}`}>
+                                {section.sectionLabel} title
+                              </label>
+                              <input
+                                id={`section-title-${section.key}`}
+                                value={titleValue}
+                                onChange={(event) => editSection(section.key, "title", event.target.value)}
+                                className="w-full rounded-lg border border-neutral-200 bg-neutral-50 px-3 py-1.5 text-sm font-medium text-neutral-900 focus:border-violet-400 focus:outline-none dark:border-white/10 dark:bg-black/30 dark:text-white dark:focus:border-violet-400/60"
+                              />
+                              <CharCount value={titleValue} max={contractMaxChars(section.slotId, section.titleField)} />
+                            </>
+                          )}
+                          <label className="sr-only" htmlFor={`section-body-${section.key}`}>
+                            {section.sectionLabel} text
+                          </label>
+                          <textarea
+                            id={`section-body-${section.key}`}
+                            value={bodyValue}
+                            onChange={(event) => editSection(section.key, "body", event.target.value)}
+                            rows={4}
+                            className="w-full rounded-lg border border-neutral-200 bg-neutral-50 px-3 py-2 text-sm leading-relaxed text-neutral-700 focus:border-violet-400 focus:outline-none dark:border-white/10 dark:bg-black/30 dark:text-indigo-100/90 dark:focus:border-violet-400/60"
+                          />
+                          <CharCount value={bodyValue} max={contractMaxChars(section.slotId, "body")} />
+                        </div>
+                      );
+                    })}
+                  </div>
+                </details>
+              )}
               {project.caseStudyBinding && project.caseStudyBinding.diagnostics.length > 0 && (
                 <ul className="flex flex-col gap-2 text-sm text-amber-700 dark:text-amber-300">
                   {project.caseStudyBinding.diagnostics.map((diagnostic, index) => (
@@ -798,37 +1199,53 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
                   ))}
                 </ul>
               )}
-              {bindingError && <p className="text-base text-red-600 dark:text-red-400">{bindingError}</p>}
+              {bindingError && <p className="text-xs text-red-600 dark:text-red-400">{bindingError}</p>}
             </section>
           )}
 
           </div>
 
-          <div className="flex min-h-0 flex-col gap-6 lg:w-1/2">
+          <div className="flex min-h-0 flex-col gap-4 lg:flex-1">
 
-          <section className="flex shrink-0 flex-col gap-4 rounded-3xl border border-neutral-200 bg-white p-6 shadow-sm dark:border-white/10 dark:bg-white/[0.03] dark:backdrop-blur-sm">
-            <label className="text-xl font-medium text-neutral-800 dark:text-indigo-100">Regenerate with feedback</label>
+          <section className="flex shrink-0 flex-col gap-2 rounded-2xl border border-neutral-200 bg-white p-4 shadow-sm dark:border-white/10 dark:bg-white/[0.03] dark:backdrop-blur-sm">
+            <label htmlFor="site-title" className="text-sm font-semibold text-neutral-800 dark:text-indigo-100">
+              Site title
+            </label>
+            <input
+              id="site-title"
+              value={editedTitle}
+              onChange={(event) => setEditedTitle(event.target.value)}
+              maxLength={200}
+              className="w-full rounded-xl border border-neutral-200 bg-neutral-50 px-3 py-2 text-sm font-medium text-neutral-900 focus:border-violet-400 focus:outline-none dark:border-white/10 dark:bg-black/30 dark:text-white dark:focus:border-violet-400/60"
+            />
+          </section>
+
+          <section className="flex shrink-0 flex-col gap-3 rounded-2xl border border-neutral-200 bg-white p-4 shadow-sm dark:border-white/10 dark:bg-white/[0.03] dark:backdrop-blur-sm">
+            <label className="text-sm font-semibold text-neutral-800 dark:text-indigo-100">Regenerate with feedback</label>
             <textarea
               value={feedbackText}
               onChange={(event) => setFeedbackText(event.target.value)}
               disabled={regenerating}
               rows={2}
               placeholder='e.g. "make chunk 3 more concise" — chunks you hand-edit below are always preserved as-is.'
-              className="w-full rounded-xl border border-neutral-200 bg-neutral-50 px-4 py-3 text-lg text-neutral-900 placeholder:text-neutral-400 focus:border-violet-400 focus:outline-none dark:border-white/10 dark:bg-black/30 dark:text-white dark:placeholder:text-indigo-200/30 dark:focus:border-violet-400/60"
+              className="w-full rounded-xl border border-neutral-200 bg-neutral-50 px-3 py-2 text-sm text-neutral-900 placeholder:text-neutral-400 focus:border-violet-400 focus:outline-none dark:border-white/10 dark:bg-black/30 dark:text-white dark:placeholder:text-indigo-200/30 dark:focus:border-violet-400/60"
             />
             <button
               type="button"
               onClick={handleRegenerate}
               disabled={regenerating}
-              className="self-start rounded-full border border-neutral-200 bg-neutral-50 px-6 py-3 text-lg font-medium text-neutral-700 transition-colors hover:bg-neutral-100 disabled:opacity-30 dark:border-white/10 dark:bg-white/5 dark:text-indigo-100 dark:hover:bg-white/10"
+              className="self-start rounded-full border border-neutral-200 bg-neutral-50 px-4 py-2 text-sm font-medium text-neutral-700 transition-colors active:scale-[0.98] hover:bg-neutral-100 disabled:opacity-30 dark:border-white/10 dark:bg-white/5 dark:text-indigo-100 dark:hover:bg-white/10"
             >
               {regenerating ? "Regenerating…" : "Regenerate"}
             </button>
             {regenerating && <LoadingBar label="Regenerating storyline…" />}
-            {regenerateError && <p className="text-base text-red-600 dark:text-red-400">{regenerateError}</p>}
+            {regenerateError && <p className="text-xs text-red-600 dark:text-red-400">{regenerateError}</p>}
           </section>
 
-          <div ref={chunksPaneRef} className="relative min-h-0 flex-1 overflow-hidden">
+          {/* Fixed height below lg: each chunk slide is sized to the pane's own
+              measured height, so an unbounded pane would grow with its content
+              and keep re-measuring larger. At lg+ the column bounds it. */}
+          <div ref={chunksPaneRef} className="relative h-[460px] min-h-0 overflow-hidden lg:h-auto lg:flex-1">
             <div
               className="transition-transform duration-500 ease-[cubic-bezier(0.22,1,0.36,1)]"
               style={{ transform: `translateY(-${activeChunkIndex * chunkPaneHeight}px)` }}
@@ -842,39 +1259,69 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
                     style={{ height: chunkPaneHeight || "100%" }}
                   >
                     <div
-                      className={`chunk-card relative max-h-full w-full max-w-2xl overflow-y-auto rounded-3xl border p-6 shadow-2xl transition-all duration-500 dark:shadow-[0_0_60px_rgba(99,102,241,0.15)] ${
+                      className={`chunk-card thin-scroll relative max-h-full w-full max-w-2xl overflow-y-auto rounded-2xl border p-4 shadow-2xl transition-all duration-500 dark:shadow-[0_0_60px_rgba(99,102,241,0.15)] ${
                         isActive
                           ? "chunk-card--active scale-100 opacity-100"
                           : "scale-[0.86] opacity-40"
                       } border-neutral-200 bg-white dark:border-white/10 dark:bg-neutral-950`}
                     >
-                      <div className="mb-3 flex items-center justify-between pt-6">
-                        <span className="text-lg font-medium text-cyan-700 dark:text-cyan-300/70">Chunk {chunk.order}</span>
-                        {chunk.userEdited && (
-                          <span className="rounded-full bg-amber-100 px-3 py-1 text-sm font-medium text-amber-700 dark:bg-amber-400/15 dark:text-amber-300">
-                            edited
-                          </span>
-                        )}
+                      <div className="mb-2 flex flex-wrap items-center justify-between gap-2 pt-6">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className="text-xs font-semibold uppercase tracking-wide text-cyan-700 dark:text-cyan-300/70">Chapter {chunk.order}</span>
+                          {chunk.userEdited && (
+                            <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[11px] font-medium text-amber-700 dark:bg-amber-400/15 dark:text-amber-300">
+                              edited
+                            </span>
+                          )}
+                          {!isCaseStudyProject &&
+                            (publishedChunkIds.has(chunk.id) &&
+                            project.chunks.find((saved) => saved.id === chunk.id)?.narrativeText !== chunk.narrativeText ? (
+                              <span className="rounded-full bg-violet-100 px-2 py-0.5 text-[11px] font-medium text-violet-700 dark:bg-violet-400/15 dark:text-violet-200">
+                                Unsaved · narration will need updating
+                              </span>
+                            ) : (
+                              <NarrationBadge state={chunkNarrationState(chunk, selectedVoice || undefined)} />
+                            ))}
+                        </div>
+                        <div className="flex items-center gap-1" role="group" aria-label={`Chapter ${chunk.order} actions`}>
+                          <button type="button" onClick={() => moveChunk(i, -1)} disabled={!isActive || i === 0} aria-label="Move chapter up" title="Move up" className={iconButton}>
+                            ↑
+                          </button>
+                          <button type="button" onClick={() => moveChunk(i, 1)} disabled={!isActive || i === editedChunks.length - 1} aria-label="Move chapter down" title="Move down" className={iconButton}>
+                            ↓
+                          </button>
+                          <button type="button" onClick={() => addChunkAfter(i)} disabled={!isActive} aria-label="Add a chapter after this one" title="Add chapter after" className={iconButton}>
+                            + Add
+                          </button>
+                          <button type="button" onClick={() => deleteChunk(i)} disabled={!isActive || editedChunks.length <= 1} aria-label="Delete chapter" title="Delete chapter" className={`${iconButton} text-red-600 dark:text-red-400`}>
+                            Delete
+                          </button>
+                        </div>
                       </div>
                       <input
                         value={chunk.title}
+                        placeholder="Chapter title"
+                        aria-label={`Chapter ${chunk.order} title`}
                         onChange={(event) => editChunkField(chunk.id, "title", event.target.value)}
-                        className="mb-3 w-full rounded-xl border border-neutral-200 bg-neutral-50 px-4 py-3 text-xl font-medium text-neutral-900 focus:border-violet-400 focus:outline-none dark:border-white/10 dark:bg-black/30 dark:text-white dark:focus:border-violet-400/60"
+                        className="mb-2 w-full rounded-xl border border-neutral-200 bg-neutral-50 px-3 py-2 text-sm font-medium text-neutral-900 focus:border-violet-400 focus:outline-none dark:border-white/10 dark:bg-black/30 dark:text-white dark:focus:border-violet-400/60"
                       />
                       <textarea
                         value={chunk.narrativeText}
+                        placeholder="Narration text (what the voice reads and the site shows)"
+                        aria-label={`Chapter ${chunk.order} narration text`}
                         onChange={(event) => editChunkField(chunk.id, "narrativeText", event.target.value)}
-                        rows={3}
-                        className="w-full rounded-xl border border-neutral-200 bg-neutral-50 px-4 py-3 text-lg leading-relaxed text-neutral-700 focus:border-violet-400 focus:outline-none dark:border-white/10 dark:bg-black/30 dark:text-indigo-100/90 dark:focus:border-violet-400/60"
+                        rows={5}
+                        className="w-full rounded-xl border border-neutral-200 bg-neutral-50 px-3 py-2 text-sm leading-relaxed text-neutral-700 focus:border-violet-400 focus:outline-none dark:border-white/10 dark:bg-black/30 dark:text-indigo-100/90 dark:focus:border-violet-400/60"
                       />
 
-                      <div className="mt-4 flex flex-wrap items-center gap-3">
+                      <div className="mt-3 flex flex-wrap items-center gap-2">
                         {chunk.audioUrl && <AudioPlayer src={chunk.audioUrl} />}
                         <button
                           type="button"
                           onClick={() => generateAudio([chunk.id])}
-                          disabled={!selectedVoice || isBusy}
-                          className="rounded-full border border-neutral-200 bg-neutral-50 px-4 py-2 text-base font-medium text-neutral-700 transition-colors hover:bg-neutral-100 disabled:opacity-30 dark:border-white/10 dark:bg-white/5 dark:text-indigo-100 dark:hover:bg-white/10"
+                          disabled={!selectedVoice || isBusy || chunksDirty || !publishedChunkIds.has(chunk.id)}
+                          title={chunksDirty ? "Save your changes first" : undefined}
+                          className="rounded-full border border-neutral-200 bg-neutral-50 px-3 py-1.5 text-xs font-medium text-neutral-700 transition-colors active:scale-[0.98] hover:bg-neutral-100 disabled:opacity-30 dark:border-white/10 dark:bg-white/5 dark:text-indigo-100 dark:hover:bg-white/10"
                         >
                           {generatingChunkId === chunk.id
                             ? "Generating…"
@@ -914,18 +1361,27 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
             </div>
           </div>
 
-          {chunksDirty && (
-            <div className="z-[1001] flex shrink-0 items-center gap-3 self-start rounded-full border border-neutral-200 bg-white/95 p-1.5 pl-5 shadow-lg backdrop-blur-sm dark:border-white/10 dark:bg-neutral-900/90 dark:shadow-[0_0_30px_rgba(139,92,246,0.25)]">
-              <span className="text-base font-medium text-neutral-500 dark:text-indigo-200/70">Unsaved changes</span>
+          {hasUnsavedChanges && (
+            // Fixed, so it stays reachable from the section editor in the other column (and on phones).
+            <div className="fixed inset-x-4 bottom-4 z-[1001] mx-auto flex max-w-xl flex-wrap items-center justify-center gap-2 rounded-2xl border border-neutral-200 bg-white/95 p-2 pl-4 shadow-lg backdrop-blur-sm dark:border-white/10 dark:bg-neutral-900/90 dark:shadow-[0_0_30px_rgba(139,92,246,0.25)] sm:rounded-full">
+              <span className="text-sm font-medium text-neutral-500 dark:text-indigo-200/70">Unsaved changes</span>
               <button
                 type="button"
-                onClick={handleSaveChunks}
+                onClick={discardChanges}
                 disabled={savingChunks}
-                className="rounded-full bg-gradient-to-r from-violet-500 to-cyan-400 px-5 py-2.5 text-base font-semibold text-neutral-950 disabled:opacity-30"
+                className="rounded-full border border-neutral-200 bg-neutral-50 px-4 py-2 text-sm font-medium text-neutral-700 hover:bg-neutral-100 disabled:opacity-30 dark:border-white/10 dark:bg-white/5 dark:text-indigo-100 dark:hover:bg-white/10"
+              >
+                Discard
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleSaveChanges()}
+                disabled={savingChunks}
+                className="rounded-full bg-gradient-to-r from-violet-500 to-cyan-400 px-4 py-2 text-sm font-semibold text-neutral-950 transition hover:brightness-110 active:scale-[0.98] disabled:opacity-30"
               >
                 {savingChunks ? "Saving…" : "Save changes"}
               </button>
-              {chunksSaveError && <span className="pr-2 text-base text-red-600 dark:text-red-400">{chunksSaveError}</span>}
+              {chunksSaveError && <span className="w-full px-2 text-center text-xs text-red-600 dark:text-red-400">{chunksSaveError}</span>}
             </div>
           )}
 

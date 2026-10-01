@@ -16,6 +16,18 @@ export interface CaseStudySection {
   title: string;
   body: string;
   emotion: EmotionKey;
+  /** Where this section lives in the bound slots: slots[slotId] or slots[slotId][index]. */
+  slotId: string;
+  index: number | null;
+  /** The slot field its title is read from, or null when the slot has no title of its own. */
+  titleField: "title" | "name" | null;
+}
+
+/** One user edit of a flattened section, addressed by CaseStudySection.key. */
+export interface CaseStudySectionEdit {
+  key: string;
+  title?: string;
+  body?: string;
 }
 
 const SECTION_EMOTION: Record<string, EmotionKey> = {
@@ -72,6 +84,9 @@ export function flattenCaseStudySections(slots: Record<string, unknown> | null):
       title: asText(record?.name) ?? label,
       body,
       emotion: SECTION_EMOTION[key],
+      slotId: key,
+      index: null,
+      titleField: record && "name" in record ? "name" : null,
     });
   }
 
@@ -86,9 +101,57 @@ export function flattenCaseStudySections(slots: Record<string, unknown> | null):
         title: asText(item.title) ?? `${label} ${index + 1}`,
         body,
         emotion: SECTION_EMOTION[key],
+        slotId: key,
+        index,
+        titleField: "title" in item ? "title" : null,
       });
     });
   }
 
   return sections;
+}
+
+/**
+ * Applies text edits to a copy of `slots`, addressing each edit through the
+ * flattened section it came from (so the editor never needs to know slot
+ * names). Edits for unknown keys are ignored. Returns the new slots and the
+ * keys whose narrated text (body) actually changed.
+ */
+export function applyCaseStudySectionEdits(
+  slots: Record<string, unknown>,
+  edits: CaseStudySectionEdit[]
+): { slots: Record<string, unknown>; changedKeys: string[]; bodyChangedKeys: string[] } {
+  const next = JSON.parse(JSON.stringify(slots)) as Record<string, unknown>;
+  const byKey = new Map(flattenCaseStudySections(slots).map((section) => [section.key, section]));
+  const changedKeys = new Set<string>();
+  const bodyChangedKeys = new Set<string>();
+
+  for (const edit of edits) {
+    const section = byKey.get(edit.key);
+    if (!section) continue;
+    const container = next[section.slotId];
+    const record =
+      section.index === null
+        ? asRecord(container)
+        : Array.isArray(container)
+          ? asRecord(container[section.index])
+          : null;
+    if (!record) continue;
+
+    if (typeof edit.body === "string" && edit.body !== section.body) {
+      record.body = edit.body;
+      changedKeys.add(section.key);
+      bodyChangedKeys.add(section.key);
+    }
+    if (typeof edit.title === "string" && section.titleField && edit.title !== section.title) {
+      const current = typeof record[section.titleField] === "string" ? record[section.titleField] : null;
+      const value = edit.title.trim() ? edit.title : null;
+      if (value !== current) {
+        record[section.titleField] = value;
+        changedKeys.add(section.key);
+      }
+    }
+  }
+
+  return { slots: next, changedKeys: [...changedKeys], bodyChangedKeys: [...bodyChangedKeys] };
 }

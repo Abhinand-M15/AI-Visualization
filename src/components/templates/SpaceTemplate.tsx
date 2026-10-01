@@ -7,12 +7,15 @@ import { ASMRBackground } from "@/components/ui/asmr-background";
 import { avatarForIndex, type TemplateProps } from "./types";
 import { AvatarDisplay } from "./AvatarDisplay";
 import { NarrationMasterControl } from "@/components/ui/NarrationMasterControl";
+import { NARRATION_DOCK_THEMES } from "@/lib/narrationDock";
 import { isNarrationPaused } from "@/lib/narrationControl";
+import { useNarrationAutoScroll } from "@/lib/useNarrationAutoScroll";
 
 if (typeof window !== "undefined") gsap.registerPlugin(ScrollTrigger);
 
 export default function SpaceTemplate({ title, chunks, avatars }: TemplateProps) {
   const containerRef = useRef<HTMLDivElement>(null);
+  useNarrationAutoScroll(containerRef, ".space-section");
 
   useEffect(() => {
     const ctx = gsap.context(() => {
@@ -72,7 +75,7 @@ export default function SpaceTemplate({ title, chunks, avatars }: TemplateProps)
           if (!isNarrationPaused()) {
             audio.play().catch(() => {
               // Autoplay can be blocked before the user has interacted with the page —
-              // the visible <audio> controls still let them start it manually.
+              // scrolling the section back into view tries again.
             });
           }
           currentAudio = audio;
@@ -112,11 +115,11 @@ export default function SpaceTemplate({ title, chunks, avatars }: TemplateProps)
   return (
     <div ref={containerRef} className="relative text-white">
       <ASMRBackground />
-      <NarrationMasterControl />
+      <NarrationMasterControl theme={NARRATION_DOCK_THEMES.space} />
 
       <header className="relative px-10 pb-16 pt-24">
         <span className="text-xs font-light uppercase tracking-[0.4em] text-white/30">Space</span>
-        <h1 className="mt-4 max-w-3xl text-4xl font-medium leading-tight md:text-5xl">{title}</h1>
+        <h1 className="mt-4 max-w-3xl text-2xl font-medium leading-tight md:text-[1.75rem]">{title}</h1>
       </header>
 
       {chunks.map((chunk, index) => {
@@ -145,10 +148,10 @@ export default function SpaceTemplate({ title, chunks, avatars }: TemplateProps)
               <span className="text-xs font-medium uppercase tracking-wide text-white/40">
                 {String(index + 1).padStart(2, "0")} / {String(chunks.length).padStart(2, "0")}
               </span>
-              <h2 className="text-2xl font-medium md:text-3xl">{chunk.title}</h2>
+              <h2 className="text-base font-medium md:text-lg">{chunk.title}</h2>
               <p
-                className="font-medium leading-[1.15] tracking-tight"
-                style={{ fontSize: "clamp(1.5rem, 3.2vw, 3rem)" }}
+                className="font-medium leading-normal tracking-tight"
+                style={{ fontSize: "clamp(0.9375rem, 1.25vw, 1.125rem)" }}
               >
                 {words.map((word, i) => (
                   <span key={i} className="word text-white/25 transition-colors duration-150">
@@ -157,8 +160,7 @@ export default function SpaceTemplate({ title, chunks, avatars }: TemplateProps)
                 ))}
               </p>
               {chunk.audioUrl && (
-                // eslint-disable-next-line jsx-a11y/media-has-caption
-                <audio controls src={chunk.audioUrl} className="mt-2 h-9 max-w-sm" />
+                <audio src={chunk.audioUrl} />
               )}
             </div>
           </section>

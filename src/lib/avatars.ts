@@ -25,7 +25,7 @@ export const AVATARS: Avatar[] = [
     name: "Avatar 1",
     imageUrl: "/avatars/avatar-1/neutral.png",
     modelUrl: "/models/avatar-1-robot.glb",
-    videoUrls: ["/videos/avatar-1-lunar-explaining.mp4"],
+    videoUrls: ["/videos/avatar-1-astronaut.webm"],
     emotions: {
       neutral: "/avatars/avatar-1/neutral.png",
       confused: "/avatars/avatar-1/confused.png",
@@ -49,6 +49,14 @@ export const AVATARS: Avatar[] = [
     },
   },
 ];
+
+/** A transparent (VP9-alpha) .webm avatar video ships alongside an .mp4 of
+ *  the same name as a fallback: Safari doesn't render WebM alpha and older
+ *  versions can't play WebM at all, so browsers pick the first source they
+ *  can play. */
+export function avatarVideoFallbackUrl(videoUrl: string): string | undefined {
+  return videoUrl.endsWith(".webm") ? videoUrl.replace(/\.webm$/, ".mp4") : undefined;
+}
 
 export function getAvatarById(id: string): Avatar | undefined {
   return AVATARS.find((avatar) => avatar.id === id);

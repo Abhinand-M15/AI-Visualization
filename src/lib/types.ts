@@ -1,5 +1,16 @@
 export type DocumentType = "case-study" | "brd" | "other";
 
+/** Every document type with its display label (the upload page and the library read this). */
+export const DOCUMENT_TYPES: { value: DocumentType; label: string }[] = [
+  { value: "case-study", label: "Case study" },
+  { value: "brd", label: "BRD" },
+  { value: "other", label: "Other" },
+];
+
+export function documentTypeLabel(value: DocumentType | string): string {
+  return DOCUMENT_TYPES.find((type) => type.value === value)?.label ?? value;
+}
+
 /**
  * Narrative "beat" of a chunk, used to pick a matching avatar expression.
  * - confused: describes a problem, struggle, or challenge
@@ -39,6 +50,14 @@ export interface Chunk {
   /** Set once Phase 2 (voice) generates audio for this chunk. */
   audioUrl?: string;
   audioDurationSec?: number;
+  /** Voice the current audioUrl was generated with (unset on audio made before this was tracked). */
+  audioVoice?: string;
+  /**
+   * The narration text changed after audio was generated, so that audio was
+   * dropped. Distinguishes "needs updating" from "never narrated"; cleared
+   * when new audio is generated.
+   */
+  narrationOutdated?: boolean;
   /** True once the user has hand-edited this chunk; revisions must preserve it verbatim. */
   userEdited?: boolean;
   /** Case-study-only fields (see CaseStudyPhase) — undefined for other document types. */
@@ -90,6 +109,29 @@ export interface CaseStudyBinding {
    * video when a section hasn't been generated yet.
    */
   sectionVideo?: Record<string, string>;
+  /** Voice each sectionAudio entry was generated with, keyed like sectionAudio. */
+  sectionAudioVoice?: Record<string, string>;
+  /** Section keys whose text was edited after narration (their audio was dropped). */
+  outdatedSections?: string[];
+  /**
+   * Set when the chapters were edited after this layout was generated: the
+   * sections below no longer reflect the chapters until the layout is
+   * regenerated (or the section text is edited directly).
+   */
+  chunksChangedAt?: string;
+}
+
+/**
+ * What was last published, kept inside projects.payload so it works with and
+ * without the accounts migration. `contentHash` is contentFingerprint() of the
+ * project as published (see src/lib/contentVersion.ts).
+ */
+export interface PublicationRecord {
+  contentHash: string;
+  /** Null for a baseline inferred from a site published before this was recorded. */
+  publishedAt: string | null;
+  /** True when the baseline was inferred at the first edit after publishing, not recorded by a publish. */
+  inferred?: boolean;
 }
 
 export interface Project {
@@ -106,6 +148,8 @@ export interface Project {
   createdAt: string;
   /** Set once the case-study layout-binding step has run (see /bind-case-study). */
   caseStudyBinding?: CaseStudyBinding | null;
+  /** Fingerprint of what was last published; compare with contentFingerprint(project). */
+  publication?: PublicationRecord;
 }
 
 export const ACCEPTED_DOCUMENT_EXTENSIONS = [".pdf", ".pptx", ".xlsx"] as const;

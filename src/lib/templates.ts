@@ -35,6 +35,11 @@ export const TEMPLATES: TemplateInfo[] = [
     name: "Airlock",
     description: "Opens with a scroll-locked video hero — scrolling scrubs the footage forward and back until it finishes, then hands off into the narrated story below.",
   },
+  {
+    id: "voyage",
+    name: "Voyage",
+    description: "Pick a chapter from a wheel of planets, then scroll through it: layered parallax skies, a giant title, your avatar and two glass cards. Scroll past the end to fly to the next chapter.",
+  },
 ];
 
 export function getTemplateById(id: string): TemplateInfo | undefined {

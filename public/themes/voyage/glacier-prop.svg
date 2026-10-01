@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 600 600" width="600" height="600">
+<defs><linearGradient id="b" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#f4f1fa"/><stop offset="1" stop-color="#8f86a8"/></linearGradient><pattern id="pn" width="26" height="26" patternUnits="userSpaceOnUse"><rect width="26" height="26" fill="#0f2f63"/><path d="M0 0H26V26" fill="none" stroke="#83efff" stroke-width="1.5" opacity="0.7"/></pattern></defs><g transform="rotate(-24 300 300)">
+<rect x="20" y="245" width="190" height="110" fill="url(#pn)" stroke="#83efff" stroke-width="3"/>
+<rect x="390" y="245" width="190" height="110" fill="url(#pn)" stroke="#83efff" stroke-width="3"/>
+<rect x="210" y="296" width="30" height="8" fill="#8f86a8"/><rect x="360" y="296" width="30" height="8" fill="#8f86a8"/>
+<rect x="240" y="230" width="120" height="140" rx="18" fill="url(#b)"/>
+<rect x="258" y="255" width="84" height="26" rx="6" fill="#0a1838"/><circle cx="300" cy="330" r="14" fill="#83efff"/>
+<line x1="300" y1="230" x2="300" y2="170" stroke="#c9c2dc" stroke-width="6"/>
+<path d="M248 140 A52 52 0 0 0 352 140Z" fill="url(#b)"/><circle cx="300" cy="130" r="8" fill="#83efff"/></g>
+</svg>

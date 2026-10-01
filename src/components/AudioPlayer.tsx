@@ -44,7 +44,7 @@ export function AudioPlayer({ src }: { src: string }) {
   }
 
   return (
-    <div className="flex flex-1 min-w-[220px] items-center gap-3 rounded-full border border-neutral-200 bg-neutral-50 py-2 pl-2 pr-4 dark:border-white/10 dark:bg-black/30">
+    <div className="flex flex-1 min-w-[200px] items-center gap-2 rounded-full border border-neutral-200 bg-neutral-50 py-1 pl-1 pr-3 dark:border-white/10 dark:bg-black/30">
       <audio
         ref={audioRef}
         src={src}
@@ -61,15 +61,15 @@ export function AudioPlayer({ src }: { src: string }) {
         type="button"
         onClick={togglePlay}
         aria-label={playing ? "Pause" : "Play"}
-        className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-gradient-to-r from-violet-500 to-cyan-400 text-neutral-950 shadow-[0_0_14px_rgba(139,92,246,0.45)] transition-transform hover:scale-105 active:scale-95"
+        className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-gradient-to-r from-violet-500 to-cyan-400 text-neutral-950 shadow-[0_0_14px_rgba(139,92,246,0.45)] transition-transform hover:scale-105 active:scale-95"
       >
         {playing ? (
-          <svg width="14" height="14" viewBox="0 0 14 14" fill="currentColor">
+          <svg width="11" height="11" viewBox="0 0 14 14" fill="currentColor">
             <rect x="2" y="1" width="3.5" height="12" rx="1" />
             <rect x="8.5" y="1" width="3.5" height="12" rx="1" />
           </svg>
         ) : (
-          <svg width="14" height="14" viewBox="0 0 14 14" fill="currentColor">
+          <svg width="11" height="11" viewBox="0 0 14 14" fill="currentColor">
             <path d="M2.5 1.3c0-.9 1-1.5 1.8-1L12 6.3c.8.5.8 1.7 0 2.2l-7.7 5.2c-.8.5-1.8-.1-1.8-1V1.3z" />
           </svg>
         )}
@@ -86,7 +86,7 @@ export function AudioPlayer({ src }: { src: string }) {
         aria-label="Seek"
       />
 
-      <span className="w-16 shrink-0 text-right text-sm tabular-nums text-neutral-500 dark:text-indigo-200/60">
+      <span className="shrink-0 whitespace-nowrap text-right text-xs tabular-nums text-neutral-500 dark:text-indigo-200/60">
         {formatTime(currentTime)} / {formatTime(duration)}
       </span>
     </div>

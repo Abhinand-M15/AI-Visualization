@@ -1,7 +1,7 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { getAvatarImage, type Avatar } from "@/lib/avatars";
+import { useEffect, useRef, useState } from "react";
+import { avatarVideoFallbackUrl, getAvatarImage, type Avatar } from "@/lib/avatars";
 import type { EmotionKey } from "@/lib/types";
 import { Avatar3D } from "@/components/ui/avatar-3d";
 import { Avatar3DErrorBoundary } from "@/components/ui/avatar-3d-error-boundary";
@@ -59,19 +59,34 @@ export function AvatarDisplay({
   videoUrl?: string;
 }) {
   const src = getAvatarImage(avatar, emotion);
+  // An avatar with a video always shows it, in every template, ahead of its
+  // 3D model / reactive image — only a section-specific video (Wav2Lip,
+  // passed as mode="video" + videoUrl) takes priority over it.
+  const defaultVideoUrl = avatar.videoUrls?.[0];
   const [use3D, setUse3D] = useState(false);
   const [reactiveWrapEl, setReactiveWrapEl] = useState<HTMLDivElement | null>(null);
   const [sectionAudio, setSectionAudio] = useState<HTMLAudioElement | null>(null);
 
   useEffect(() => {
-    if (mode === "auto" && avatar.modelUrl && hasWebGLSupport()) setUse3D(true);
-  }, [mode, avatar.modelUrl]);
+    if (mode === "auto" && avatar.modelUrl && !defaultVideoUrl && hasWebGLSupport()) setUse3D(true);
+  }, [mode, avatar.modelUrl, defaultVideoUrl]);
 
   useEffect(() => {
     if (mode !== "reactive" || !reactiveWrapEl) return;
     const section = reactiveWrapEl.closest(".case-study-section, .lunar-section");
     setSectionAudio(section?.querySelector("audio") ?? null);
   }, [mode, reactiveWrapEl]);
+
+  if (mode === "video" && videoUrl) {
+    return (
+      // eslint-disable-next-line jsx-a11y/media-has-caption
+      <video src={videoUrl} className={className} muted loop playsInline preload="metadata" />
+    );
+  }
+
+  if (defaultVideoUrl) {
+    return <InViewVideo src={defaultVideoUrl} className={className} />;
+  }
 
   if (mode === "reactive") {
     return (
@@ -80,13 +95,6 @@ export function AvatarDisplay({
         <img src={src} alt="" style={{ width: "100%", height: "100%", objectFit: "contain" }} />
         <ReactiveMouthOverlay audioEl={sectionAudio} containerEl={reactiveWrapEl} />
       </div>
-    );
-  }
-
-  if (mode === "video" && videoUrl) {
-    return (
-      // eslint-disable-next-line jsx-a11y/media-has-caption
-      <video src={videoUrl} className={className} muted loop playsInline preload="metadata" />
     );
   }
 
@@ -107,4 +115,38 @@ export function AvatarDisplay({
     // eslint-disable-next-line @next/next/no-img-element
     <img src={src} alt="" className={className} />
   );
+}
+
+/** Muted looping avatar video that plays only while on screen — the same
+ *  "never all decoding at once" rule as above, without depending on each
+ *  template's own scroll-activation wiring. */
+function InViewVideo({ src, className }: { src: string; className?: string }) {
+  const ref = useRef<HTMLVideoElement>(null);
+
+  useEffect(() => {
+    const video = ref.current;
+    if (!video) return;
+    const observer = new IntersectionObserver(
+      ([entry]) => {
+        if (entry.isIntersecting) video.play().catch(() => {});
+        else video.pause();
+      },
+      { threshold: 0.25 }
+    );
+    observer.observe(video);
+    return () => observer.disconnect();
+  }, []);
+
+  const fallback = avatarVideoFallbackUrl(src);
+  if (fallback) {
+    return (
+      // eslint-disable-next-line jsx-a11y/media-has-caption
+      <video ref={ref} className={className} muted loop playsInline preload="metadata">
+        <source src={src} type="video/webm" />
+        <source src={fallback} type="video/mp4" />
+      </video>
+    );
+  }
+  // eslint-disable-next-line jsx-a11y/media-has-caption
+  return <video ref={ref} src={src} className={className} muted loop playsInline preload="metadata" />;
 }

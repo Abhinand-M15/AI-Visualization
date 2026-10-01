@@ -1,6 +1,15 @@
 import type { Chunk, Project } from "@/lib/types";
-import { getAvatarImage, type Avatar } from "@/lib/avatars";
+import { avatarVideoFallbackUrl, getAvatarImage, type Avatar } from "@/lib/avatars";
 import { flattenCaseStudySections, type CaseStudySection } from "@/lib/caseStudySections";
+import { lunarHeroDescription, lunarHeroTitleParts, lunarHeroTitleSize } from "@/lib/lunarHero";
+import {
+  NARRATION_DOCK_CSS,
+  NARRATION_DOCK_JS,
+  NARRATION_DOCK_THEMES,
+  narrationDockMarkup,
+  type NarrationDockThemeId,
+} from "@/lib/narrationDock";
+import { renderVoyage, type VoyageSiteOptions } from "./voyageSite";
 
 const GSAP_CDN = "https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.5/gsap.min.js";
 const SCROLLTRIGGER_CDN = "https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.5/ScrollTrigger.min.js";
@@ -16,8 +25,21 @@ const GLTF_LOADER_CDN = "https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/
 const AVATAR_MODEL_CDN_SCRIPTS = [THREE_CDN, ORBIT_CONTROLS_CDN, GLTF_LOADER_CDN];
 
 function needsAvatarModel(avatars: Avatar[]): boolean {
-  return avatars.some((avatar) => Boolean(avatar.modelUrl));
+  // An avatar's video takes precedence over its model (see avatarBoxHtml).
+  return avatars.some((avatar) => Boolean(avatar.modelUrl) && !(avatar.videoUrls && avatar.videoUrls.length > 0));
 }
+
+/** For templates without per-section scroll activation (Clarity, Cinematic):
+ *  play each avatar video only while it's on screen, so they don't all
+ *  decode and loop at once. */
+const AVATAR_VIDEO_IN_VIEW_JS = `
+document.querySelectorAll('.avatar-box video').forEach(function(video){
+  ScrollTrigger.create({
+    trigger: video.parentElement, start: 'top bottom', end: 'bottom top',
+    onToggle: function(self){ if (self.isActive) video.play().catch(function(){}); else video.pause(); }
+  });
+});
+`;
 
 /** Some templates (Lunar) already need THREE_CDN/ORBIT_CONTROLS_CDN for their
  *  own background scene — avoid loading the same CDN script twice. */
@@ -70,6 +92,9 @@ function avatarImagePath(chunk: Chunk, index: number, avatars: Avatar[]): string
  *  to swap in a live, rotatable 3D canvas when the avatar has a `modelUrl`
  *  and the visitor's browser can actually run WebGL. */
 function avatarBoxHtml(avatarImage: string | null, avatar: Avatar | undefined): string {
+  // An avatar with a video always shows that video, in every template —
+  // ahead of its 3D model or still images.
+  if (avatar?.videoUrls && avatar.videoUrls.length > 0) return avatarVideoBoxHtml(avatar.videoUrls[0]);
   if (!avatarImage) return "";
   const modelAttr = avatar?.modelUrl ? ` data-model="${bundlePath(avatar.modelUrl)}"` : "";
   return `<div class="avatar-box"${modelAttr}><img src="${avatarImage}" alt="" /></div>`;
@@ -83,6 +108,10 @@ function avatarBoxHtml(avatarImage: string | null, avatar: Avatar | undefined): 
  *  like it already does for narration audio (see activateSection). */
 function avatarVideoBoxHtml(videoUrl: string | undefined): string {
   if (!videoUrl) return "";
+  const fallback = avatarVideoFallbackUrl(videoUrl);
+  if (fallback) {
+    return `<div class="avatar-box"><video muted loop playsinline preload="metadata"><source src="${bundlePath(videoUrl)}" type="video/webm" /><source src="${bundlePath(fallback)}" type="video/mp4" /></video></div>`;
+  }
   return `<div class="avatar-box"><video src="${bundlePath(videoUrl)}" muted loop playsinline preload="metadata"></video></div>`;
 }
 
@@ -329,13 +358,208 @@ ${extraScripts.map((src) => `<script src="${src}"></script>`).join("\n")}
 </html>`;
 }
 
+// ---------------------------------------------------------------------------
+// Scroll-driven narration shared by every section-per-screen template
+// (Editorial, Space, Lunar, Airlock, case study).
+//
+// Browsers refuse audio.play() until the visitor has interacted with the
+// page (a tap/click/key — scrolling doesn't count), so scroll-triggered
+// narration needs one explicit gesture first. The gate collects it up front;
+// after that, every section's narration starts as it scrolls in, and the
+// narration dock (pause/play button + auto-scroll switch, see
+// lib/narrationDock.ts) pauses/resumes it and decides whether the page
+// glides to the next section when one finishes.
+// ---------------------------------------------------------------------------
+
+function narrationGateCss(opts: { isDark: boolean; accent: string; border: string }): string {
+  return `
+#narration-gate{position:fixed;inset:0;z-index:50;display:flex;align-items:center;justify-content:center;padding:24px;background:rgba(0,0,0,.6);transition:opacity .3s;}
+#narration-gate.hidden{opacity:0;pointer-events:none;}
+#narration-gate .gate-card{max-width:360px;text-align:center;display:flex;flex-direction:column;align-items:center;gap:16px;border-radius:16px;border:1px solid ${opts.border};background:rgba(0,0,0,.75);padding:32px 24px;color:#fff;font-family:inherit;}
+#narration-gate .gate-card p{margin:0;font-size:.9375rem;line-height:1.5;color:rgba(255,255,255,.75);}
+#narration-gate button{font:inherit;cursor:pointer;}
+#narration-start{border:0;border-radius:999px;padding:12px 28px;font-size:1rem;font-weight:500;background:${opts.accent};color:#000;}
+#narration-skip{border:0;background:none;padding:4px;font-size:.8125rem;color:rgba(255,255,255,.55);text-decoration:underline;}
+${NARRATION_DOCK_CSS}`;
+}
+
+function hasChunkNarration(project: Project, supabaseUrl: string): boolean {
+  return project.chunks.some((chunk) => Boolean(audioUrl(supabaseUrl, project.id, chunk)));
+}
+
+function narrationGateMarkup(hasNarration: boolean, dock: NarrationDockThemeId): string {
+  if (!hasNarration) return "";
+  return `
+<div id="narration-gate" role="dialog" aria-label="Start narration">
+  <div class="gate-card">
+    <p>This story is narrated. Narration plays automatically as you scroll.</p>
+    <button type="button" id="narration-start">Tap to start</button>
+    <button type="button" id="narration-skip">Continue without sound</button>
+  </div>
+</div>
+${narrationDockMarkup(NARRATION_DOCK_THEMES[dock])}`;
+}
+
+// Expects currentAudio, stopHighlightTracking() and trackHighlight() to be
+// defined by the template's own script before it. Sections are `.section`
+// elements; a template whose sections have no word-by-word text (Clarity,
+// Cinematic) defines no-op highlight functions and `narrationSkipVideo` (its
+// avatar videos already play on their own in-view rule).
+const SCROLL_NARRATION_JS =
+  NARRATION_DOCK_JS +
+  `
+var activeSection = null;
+var narrationEnabled = false;
+var narrationPaused = false;
+var narrationGate = document.getElementById('narration-gate');
+var narrationToggle = ndPause;
+
+function syncNarrationDock() { ndSync(narrationPaused || !narrationEnabled); }
+
+function playNarration(audio) {
+  if (!narrationEnabled || narrationPaused) return;
+  audio.play().catch(function(err) {
+    // Still blocked (the unlock gesture didn't register) — ask again rather
+    // than failing silently.
+    if (err && err.name === 'NotAllowedError' && narrationGate) {
+      narrationEnabled = false;
+      narrationGate.classList.remove('hidden');
+    }
+  });
+}
+
+function activateSection(section) {
+  activeSection = section;
+  var audio = section.querySelector('audio');
+  var words = Array.from(section.querySelectorAll('.word'));
+  if (currentAudio && currentAudio !== audio) currentAudio.pause();
+  stopHighlightTracking();
+  if (audio) {
+    audio.currentTime = 0;
+    currentAudio = audio;
+    trackHighlight(audio, words);
+    playNarration(audio);
+  }
+  var video = window.narrationSkipVideo ? null : section.querySelector('video');
+  if (video) {
+    video.currentTime = 0;
+    video.play().catch(function(){});
+  }
+}
+
+function deactivateSection(section) {
+  if (activeSection === section) activeSection = null;
+  var audio = section.querySelector('audio');
+  var video = window.narrationSkipVideo ? null : section.querySelector('video');
+  if (audio) audio.pause();
+  if (video) video.pause();
+}
+
+// Auto-scroll: when a section's narration ends, glide to the next section. Only
+// if the switch is on, narration is not paused, the section that finished is
+// still the one under the viewport centre (the reader has not scrolled away),
+// and there is a next section (nothing happens after the last one). Media
+// "ended" events do not bubble, hence the capture-phase listener.
+function advanceFromSection(section) {
+  if (!ndAutoOn || !narrationEnabled || narrationPaused) return;
+  var rect = section.getBoundingClientRect();
+  var middle = window.innerHeight / 2;
+  if (rect.top > middle + 2 || rect.bottom < middle - 2) return;
+  var all = Array.from(document.querySelectorAll('.section'));
+  var next = all[all.indexOf(section) + 1];
+  if (next) ndScrollTo(ndSectionTarget(next));
+}
+document.addEventListener('ended', function(e) {
+  var audio = e.target;
+  if (!audio || audio.tagName !== 'AUDIO') return;
+  var section = audio.closest('.section');
+  if (section) advanceFromSection(section);
+}, true);
+
+// A section already straddling the viewport centre when the page loads never
+// gets an onEnter (nothing scrolled past its start), so fall back to geometry.
+function sectionAtViewportCenter() {
+  var middle = window.innerHeight / 2;
+  return Array.from(document.querySelectorAll('.section')).find(function(section) {
+    var rect = section.getBoundingClientRect();
+    return rect.top <= middle && rect.bottom >= middle;
+  }) || null;
+}
+
+// Called from inside the tap/click handler: starting (muted) and immediately
+// pausing every narration track while the gesture is live unlocks each
+// element individually, which iOS Safari requires on top of the page-level
+// unlock other browsers grant after any gesture.
+function enableNarration() {
+  narrationEnabled = true;
+  narrationPaused = false;
+  var primes = Array.from(document.querySelectorAll('.section audio')).map(function(audio) {
+    audio.muted = true;
+    return audio.play().then(function() {
+      audio.pause();
+      audio.currentTime = 0;
+    }).catch(function(){}).then(function() { audio.muted = false; });
+  });
+  if (narrationGate) narrationGate.classList.add('hidden');
+  ndShow();
+  syncNarrationDock();
+  Promise.all(primes).then(function() {
+    var section = activeSection || sectionAtViewportCenter();
+    if (section) activateSection(section);
+  });
+}
+
+if (narrationGate) {
+  document.getElementById('narration-start').addEventListener('click', enableNarration);
+  document.getElementById('narration-skip').addEventListener('click', function() {
+    narrationGate.classList.add('hidden');
+    narrationPaused = true;
+    ndShow();
+    syncNarrationDock();
+  });
+}
+
+if (narrationToggle) {
+  narrationToggle.addEventListener('click', function() {
+    if (!narrationEnabled) {
+      enableNarration();
+      return;
+    }
+    narrationPaused = !narrationPaused;
+    syncNarrationDock();
+    if (narrationPaused) {
+      if (currentAudio) currentAudio.pause();
+    } else if (currentAudio && activeSection && activeSection.contains(currentAudio)) {
+      playNarration(currentAudio);
+    }
+  });
+}
+
+document.querySelectorAll('.section').forEach(function(section){
+  ScrollTrigger.create({
+    trigger: section, start: 'top center', end: 'bottom center',
+    onEnter: function(){ activateSection(section); },
+    onEnterBack: function(){ activateSection(section); },
+    onLeave: function(){ deactivateSection(section); },
+    onLeaveBack: function(){ deactivateSection(section); }
+  });
+  var copy = section.querySelector('.copy');
+  if (copy) {
+    gsap.fromTo(copy, {opacity:0, y:24}, {
+      opacity:1, y:0, duration:0.6, ease:'power2.out',
+      scrollTrigger:{trigger:section, start:'top 75%'}
+    });
+  }
+});
+`;
+
 function renderEditorial(project: Project, avatars: Avatar[], supabaseUrl: string): string {
   const css = `
 :root{color-scheme:light}
 body{margin:0;font-family:-apple-system,'Segoe UI',sans-serif;background:#fff;color:#171717;}
 .header{padding:96px 32px 64px;}
-.header h1{max-width:760px;font-size:2.5rem;font-weight:500;line-height:1.2;margin:0;}
-@media(min-width:768px){.header h1{font-size:3rem;}}
+.header h1{max-width:760px;font-size:1.5rem;font-weight:500;line-height:1.2;margin:0;}
+@media(min-width:768px){.header h1{font-size:1.75rem;}}
 .section{min-height:100vh;display:flex;flex-direction:column;align-items:center;gap:40px;border-top:1px solid #f0f0f0;padding:80px 32px;box-sizing:border-box;}
 @media(min-width:768px){.section{flex-direction:row;gap:64px;padding:80px 64px;}}
 .section.reversed{flex-direction:column;}
@@ -347,13 +571,14 @@ body{margin:0;font-family:-apple-system,'Segoe UI',sans-serif;background:#fff;co
 .copy{opacity:0;transform:translateY(24px);width:100%;display:flex;flex-direction:column;gap:24px;}
 @media(min-width:768px){.copy{width:64%;}}
 .eyebrow{font-size:.75rem;text-transform:uppercase;letter-spacing:.05em;color:#a3a3a3;}
-.copy h2{font-size:1.5rem;font-weight:500;margin:0;}
-@media(min-width:768px){.copy h2{font-size:1.75rem;}}
-.big-text{font-weight:500;line-height:1.15;letter-spacing:-0.01em;font-size:clamp(1.75rem, 4.6vw, 5rem);margin:0;}
+.copy h2{font-size:1rem;font-weight:500;margin:0;}
+@media(min-width:768px){.copy h2{font-size:1.125rem;}}
+.big-text{font-weight:500;line-height:1.5;letter-spacing:-0.01em;font-size:clamp(0.9375rem, 1.25vw, 1.125rem);margin:0;}
 .word{color:#d4d4d4;transition:color .15s;}
 .word.spoken{color:#171717;}
-audio{margin-top:8px;height:36px;max-width:360px;}
-` + AVATAR_BOX_CSS;
+` +
+    narrationGateCss({ isDark: false, accent: "#fff", border: "rgba(255,255,255,.15)" }) +
+    AVATAR_BOX_CSS;
 
   const sectionsHtml = project.chunks
     .map((chunk, index) => {
@@ -369,7 +594,7 @@ audio{margin-top:8px;height:36px;max-width:360px;}
     <span class="eyebrow">${String(index + 1).padStart(2, "0")} / ${String(project.chunks.length).padStart(2, "0")}</span>
     <h2>${escapeHtml(chunk.title)}</h2>
     <p class="big-text">${wordsHtml}</p>
-    ${src ? `<audio controls src="${src}"></audio>` : ""}
+    ${src ? `<audio src="${src}"></audio>` : ""}
   </div>
 </section>`;
     })
@@ -378,6 +603,7 @@ audio{margin-top:8px;height:36px;max-width:360px;}
   const body = `
 <header class="header"><h1>${escapeHtml(project.title)}</h1></header>
 ${sectionsHtml}
+${narrationGateMarkup(hasChunkNarration(project, supabaseUrl), "light")}
 `;
 
   const js = `
@@ -422,34 +648,7 @@ function trackHighlight(audio, words) {
   currentHandler = onTimeUpdate;
 }
 
-function activateSection(section) {
-  var audio = section.querySelector('audio');
-  var words = Array.from(section.querySelectorAll('.word'));
-  if (currentAudio && currentAudio !== audio) currentAudio.pause();
-  stopHighlightTracking();
-  if (audio) {
-    audio.currentTime = 0;
-    audio.play().catch(function(){});
-    currentAudio = audio;
-    trackHighlight(audio, words);
-  }
-}
-
-document.querySelectorAll('.section').forEach(function(section){
-  var audio = section.querySelector('audio');
-  ScrollTrigger.create({
-    trigger: section, start: 'top center', end: 'bottom center',
-    onEnter: function(){ activateSection(section); },
-    onEnterBack: function(){ activateSection(section); },
-    onLeave: function(){ if (audio) audio.pause(); },
-    onLeaveBack: function(){ if (audio) audio.pause(); }
-  });
-  gsap.fromTo(section.querySelector('.copy'), {opacity:0, y:24}, {
-    opacity:1, y:0, duration:0.6, ease:'power2.out',
-    scrollTrigger:{trigger:section, start:'top 75%'}
-  });
-});
-`;
+` + SCROLL_NARRATION_JS;
 
   const needsModel = needsAvatarModel(avatars);
   return documentWrap(
@@ -464,18 +663,19 @@ document.querySelectorAll('.section').forEach(function(section){
 function renderClarity(project: Project, avatars: Avatar[], supabaseUrl: string): string {
   const css = `
 body{margin:0;font-family:-apple-system,'Segoe UI',sans-serif;background:#fafafa;color:#171717;}
-.wrap{max-width:680px;margin:0 auto;padding:80px 24px;display:flex;flex-direction:column;gap:56px;}
-h1{font-size:1.875rem;font-weight:500;letter-spacing:-0.01em;margin:0;}
+.wrap{max-width:680px;margin:0 auto;padding:80px 24px 50vh;display:flex;flex-direction:column;gap:56px;}
+h1{font-size:1.5rem;font-weight:500;letter-spacing:-0.01em;margin:0;}
 .cards{display:flex;flex-direction:column;gap:20px;}
 .card{opacity:0;transform:translateY(16px);display:flex;gap:16px;border-radius:16px;border:1px solid #e5e5e5;background:#fff;padding:24px;box-shadow:0 1px 2px rgba(0,0,0,.04);box-sizing:border-box;}
 .avatar-badge{width:48px;height:48px;border-radius:9999px;background:#f5f5f5;display:flex;align-items:center;justify-content:center;flex-shrink:0;}
 .avatar-badge .avatar-box{width:40px;height:40px;}
 .card-body{display:flex;flex-direction:column;gap:8px;flex:1;}
 .chunk-label{font-size:.75rem;font-weight:500;color:#a3a3a3;}
-.card h2{font-size:1.125rem;font-weight:500;margin:0;}
-.card p{font-size:.9rem;line-height:1.7;color:#525252;margin:0;}
-audio{margin-top:4px;height:36px;}
-` + AVATAR_BOX_CSS;
+.card h2{font-size:1rem;font-weight:500;margin:0;}
+.card p{font-size:.875rem;line-height:1.7;color:#525252;margin:0;}
+` +
+    narrationGateCss({ isDark: false, accent: "#fff", border: "rgba(255,255,255,.15)" }) +
+    AVATAR_BOX_CSS;
 
   const cardsHtml = project.chunks
     .map((chunk, index) => {
@@ -483,13 +683,13 @@ audio{margin-top:4px;height:36px;}
       const avatarImage = avatarImagePath(chunk, index, avatars);
       const src = audioUrl(supabaseUrl, project.id, chunk);
       return `
-<article class="card">
+<article class="card section">
   ${avatarImage ? `<div class="avatar-badge">${avatarBoxHtml(avatarImage, avatar)}</div>` : ""}
   <div class="card-body">
     <span class="chunk-label">Chunk ${chunk.order}</span>
     <h2>${escapeHtml(chunk.title)}</h2>
     <p>${escapeHtml(chunk.narrativeText)}</p>
-    ${src ? `<audio controls src="${src}"></audio>` : ""}
+    ${src ? `<audio src="${src}"></audio>` : ""}
   </div>
 </article>`;
     })
@@ -500,17 +700,25 @@ audio{margin-top:4px;height:36px;}
   <h1>${escapeHtml(project.title)}</h1>
   <div class="cards">${cardsHtml}</div>
 </div>
+${narrationGateMarkup(hasChunkNarration(project, supabaseUrl), "light")}
 `;
 
+  // Each card is a "section" for the shared scroll narration. The cards have no
+  // word-by-word text, so the highlight hooks are no-ops, and the avatar videos
+  // keep their own in-view rule.
   const js = `
 gsap.registerPlugin(ScrollTrigger);
+var narrationSkipVideo = true;
+var currentAudio = null;
+function stopHighlightTracking() {}
+function trackHighlight() {}
 document.querySelectorAll('.card').forEach(function(card){
   gsap.fromTo(card, {opacity:0, y:16}, {
     opacity:1, y:0, duration:0.5, ease:'power2.out',
     scrollTrigger:{trigger:card, start:'top 85%'}
   });
 });
-`;
+` + SCROLL_NARRATION_JS + AVATAR_VIDEO_IN_VIEW_JS;
 
   const needsModel = needsAvatarModel(avatars);
   return documentWrap(
@@ -527,17 +735,17 @@ function renderCinematic(project: Project, avatars: Avatar[], supabaseUrl: strin
   const css = `
 body{margin:0;font-family:-apple-system,'Segoe UI',sans-serif;color:#fff;}
 .hero{height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:0 24px;text-align:center;background:${palette[0]};box-sizing:border-box;}
-.hero h1{max-width:640px;font-size:2.25rem;font-weight:500;line-height:1.2;margin:0;}
+.hero h1{max-width:640px;font-size:1.5rem;font-weight:500;line-height:1.2;margin:0;}
 .hero p{margin-top:16px;font-size:.8rem;text-transform:uppercase;letter-spacing:.15em;color:rgba(255,255,255,.5);}
 .cine-section{min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:24px;padding:0 24px;text-align:center;box-sizing:border-box;}
 .cine-content{opacity:0;transform:scale(0.94);display:flex;flex-direction:column;align-items:center;gap:24px;}
 .cine-content .avatar-box{width:176px;height:176px;filter:drop-shadow(0 0 60px rgba(255,255,255,.15));}
 .cine-label{font-size:.75rem;text-transform:uppercase;letter-spacing:.15em;color:rgba(255,255,255,.4);}
-.cine-content h2{max-width:640px;font-size:1.5rem;font-weight:500;margin:0;}
-.cine-content p{max-width:560px;font-size:1.125rem;line-height:1.7;color:rgba(255,255,255,.7);margin:0;}
-.play-btn{border-radius:9999px;border:1px solid rgba(255,255,255,.2);background:transparent;color:#fff;padding:10px 20px;font-size:.9rem;font-weight:500;cursor:pointer;}
-.play-btn:hover{background:rgba(255,255,255,.1);}
-` + AVATAR_BOX_CSS;
+.cine-content h2{max-width:640px;font-size:1.125rem;font-weight:500;margin:0;}
+.cine-content p{max-width:560px;font-size:.9375rem;line-height:1.7;color:rgba(255,255,255,.7);margin:0;}
+` +
+    narrationGateCss({ isDark: true, accent: "#fff", border: "rgba(255,255,255,.15)" }) +
+    AVATAR_BOX_CSS;
 
   const sectionsHtml = project.chunks
     .map((chunk, index) => {
@@ -546,18 +754,13 @@ body{margin:0;font-family:-apple-system,'Segoe UI',sans-serif;color:#fff;}
       const bg = palette[(index + 1) % palette.length];
       const src = audioUrl(supabaseUrl, project.id, chunk);
       return `
-<section class="cine-section" style="background:${bg}">
+<section class="cine-section section" style="background:${bg}">
   <div class="cine-content">
     ${avatarBoxHtml(avatarImage, avatar)}
     <span class="cine-label">Chunk ${chunk.order} of ${project.chunks.length}</span>
     <h2>${escapeHtml(chunk.title)}</h2>
     <p>${escapeHtml(chunk.narrativeText)}</p>
-    ${
-      src
-        ? `<audio id="audio-${chunk.id}" src="${src}"></audio>
-    <button class="play-btn" data-audio="audio-${chunk.id}">&#9654; Play narration</button>`
-        : ""
-    }
+    ${src ? `<audio src="${src}"></audio>` : ""}
   </div>
 </section>`;
     })
@@ -566,10 +769,19 @@ body{margin:0;font-family:-apple-system,'Segoe UI',sans-serif;color:#fff;}
   const body = `
 <div class="hero"><h1>${escapeHtml(project.title)}</h1><p>Scroll to begin</p></div>
 ${sectionsHtml}
+${narrationGateMarkup(hasChunkNarration(project, supabaseUrl), "cinematic")}
 `;
 
+  // Each screen is a "section" for the shared scroll narration (the per-section
+  // play buttons are gone — the narration dock is the one control). No
+  // word-by-word text, so the highlight hooks are no-ops; avatar videos keep
+  // their own in-view rule.
   const js = `
 gsap.registerPlugin(ScrollTrigger);
+var narrationSkipVideo = true;
+var currentAudio = null;
+function stopHighlightTracking() {}
+function trackHighlight() {}
 document.querySelectorAll('.cine-section').forEach(function(section){
   var content = section.querySelector('.cine-content');
   gsap.fromTo(content, {opacity:0, scale:0.94}, {
@@ -577,14 +789,7 @@ document.querySelectorAll('.cine-section').forEach(function(section){
     scrollTrigger:{trigger:section, start:'top 60%', end:'bottom 40%', toggleActions:'play reverse play reverse'}
   });
 });
-document.querySelectorAll('.play-btn').forEach(function(btn){
-  btn.addEventListener('click', function(){
-    var audio = document.getElementById(btn.dataset.audio);
-    if (!audio) return;
-    if (audio.paused) audio.play(); else audio.pause();
-  });
-});
-`;
+` + SCROLL_NARRATION_JS + AVATAR_VIDEO_IN_VIEW_JS;
 
   const needsModel = needsAvatarModel(avatars);
   return documentWrap(
@@ -702,82 +907,181 @@ const ASMR_INIT_JS = `
 })();
 `;
 
-/** Fixed full-page 3D canvas — shared by every lunar-themed render (the standalone Lunar template and the case-study layout when it opts into the Lunar background). */
+/**
+ * The Lunar theme's hero, as a static-HTML copy of the prompt's
+ * LunarGravityCard + demo wrapper (components/ui/lunar-gravity-card.tsx) —
+ * the same Tailwind classes translated 1:1 into plain CSS (md = 768px,
+ * sm = 640px), filled with the project's title/description.
+ */
 const LUNAR_CSS = `
 :root{color-scheme:dark}
 body{margin:0;font-family:-apple-system,'Segoe UI',sans-serif;background:#000;color:#fff;}
-#lunar-canvas{position:fixed;inset:0;z-index:-10;display:block;width:100%;height:100%;touch-action:pan-y;cursor:grab;}
-#lunar-canvas.dragging{cursor:grabbing;}
+.lunar-hero{width:100%;min-height:100vh;background:#09090b;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:16px;box-sizing:border-box;}
+@media(min-width:640px){.lunar-hero{padding:40px;}}
+.lunar-hero-inner{position:relative;width:100%;max-width:1000px;}
+.lunar-card{width:100%;max-width:1000px;min-height:700px;background:#000;border-radius:2.5rem;display:flex;flex-direction:column;position:relative;overflow:hidden;border:1px solid rgba(255,255,255,.08);box-shadow:0 30px 100px rgba(0,0,0,.4);box-sizing:border-box;}
+@media(min-width:768px){.lunar-card{min-height:auto;height:540px;flex-direction:row;}}
+.lunar-card-fade{position:absolute;top:0;left:0;width:100%;height:60%;background:linear-gradient(to bottom,#000,rgba(0,0,0,.9),transparent);z-index:10;pointer-events:none;}
+@media(min-width:768px){.lunar-card-fade{top:0;bottom:0;height:100%;width:60%;background:linear-gradient(to right,#000,rgba(0,0,0,.9),transparent);}}
+.lunar-card-copy{width:100%;display:flex;flex-direction:column;justify-content:center;padding:48px 40px;position:relative;z-index:20;pointer-events:none;box-sizing:border-box;}
+@media(min-width:768px){.lunar-card-copy{width:45%;padding:0 0 0 64px;}}
+.lunar-card-copy h1{font-size:var(--lunar-title-m);font-weight:700;letter-spacing:-0.05em;line-height:.9;margin:0 0 24px;}
+@media(min-width:768px){.lunar-card-copy h1{font-size:var(--lunar-title-d);}}
+.lunar-title-lead{color:#fafafa;filter:drop-shadow(0 1px 2px rgba(0,0,0,.15));}
+.lunar-title-accent{color:transparent;background-image:linear-gradient(to bottom,#fff,#a1a1aa,#27272a);-webkit-background-clip:text;background-clip:text;filter:drop-shadow(0 3px 3px rgba(0,0,0,.12));}
+.lunar-card-copy p{font-size:1rem;line-height:1.625;color:#a1a1aa;font-weight:500;max-width:340px;margin:0;}
+@media(min-width:768px){.lunar-card-copy p{font-size:1.125rem;}}
+.lunar-card-scene{position:relative;width:100%;height:450px;z-index:0;pointer-events:auto;display:flex;align-items:center;justify-content:center;}
+@media(min-width:768px){.lunar-card-scene{position:absolute;right:0;top:0;height:100%;width:65%;}}
+/* The moon scene's canvas is one fixed full-viewport layer: clipped to the
+   card's scene slot at the top of the page (so the hero is unchanged), then
+   opened up to fill the window while scrolling through the first viewport,
+   after which it stays put as the page background (see LUNAR_INIT_JS). */
+#lunar-canvas{position:fixed;left:0;top:0;width:100vw;height:100vh;display:block;z-index:1;touch-action:pan-y;}
+.section{position:relative;z-index:2;}
+.lunar-globe{position:absolute;top:24px;right:24px;width:40px;height:40px;background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.1);border-radius:9999px;display:flex;align-items:center;justify-content:center;z-index:50;color:rgba(255,255,255,.5);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);transition:all .15s;}
+.lunar-globe:hover{background:rgba(255,255,255,.1);color:#fff;transform:scale(1.1);}
+@media(min-width:768px){.lunar-globe{top:32px;right:32px;}}
 `;
 
-const LUNAR_MARKUP = `<canvas id="lunar-canvas"></canvas>`;
+function lunarCardHeroMarkup(title: string, description: string): string {
+  const { lead, accent } = lunarHeroTitleParts(title);
+  const size = lunarHeroTitleSize(title);
+  return `
+<div class="lunar-hero">
+  <canvas id="lunar-canvas"></canvas>
+  <div class="lunar-hero-inner">
+    <div class="lunar-card">
+      <div class="lunar-card-fade"></div>
+      <div class="lunar-card-copy">
+        <h1 style="--lunar-title-m:${size.mobile};--lunar-title-d:${size.desktop}">${
+          lead ? `<span class="lunar-title-lead">${escapeHtml(lead)}</span><br />` : ""
+        }<span class="lunar-title-accent">${escapeHtml(accent)}</span></h1>
+        ${description ? `<p>${escapeHtml(description)}</p>` : ""}
+      </div>
+      <div class="lunar-card-scene" id="lunar-slot"></div>
+    </div>
+    <div class="lunar-globe" aria-hidden="true">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"></path><path d="M2 12h20"></path></svg>
+    </div>
+  </div>
+</div>`;
+}
 
-const LUNAR_MOON_TEXTURE_URL =
-  "https://cdn.21st.dev/assets/mirror/fc/fcb0f1f5548e6e18d40063dd55c6aacd3daedf2407b181dab85b61e22bf9fe57.jpg";
+// Bundled with the published site (see LUNAR_MOON_TEXTURE_PUBLIC_PATH in the
+// publish route) rather than hotlinked from cdn.21st.dev: that CDN sends no
+// Access-Control-Allow-Origin header, so THREE.TextureLoader's CORS request
+// fails on any deployed origin and the moon renders untextured.
+export const LUNAR_MOON_TEXTURE_PUBLIC_PATH = "/textures/lunar-moon.jpg";
+const LUNAR_MOON_TEXTURE_URL = bundlePath(LUNAR_MOON_TEXTURE_PUBLIC_PATH);
+
+// drei's <Environment preset="city"> — the same HDRI file drei itself loads
+// (helpers/environment-assets.js + core/useEnvironment.js CUBEMAP_ROOT).
+const LUNAR_CITY_HDR_URL =
+  "https://raw.githack.com/pmndrs/drei-assets/456060a26bbeb8fdf79326f224b6d99b8bcce736/hdri/potsdamer_platz_1k.hdr";
+const RGBE_LOADER_CDN = "https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/RGBELoader.js";
+const LUNAR_SCRIPTS = [THREE_CDN, ORBIT_CONTROLS_CDN, RGBE_LOADER_CDN];
 
 /**
- * Vanilla-three.js port of LunarBackground (see components/ui/lunar-background.tsx
- * and lunar-gravity-card.tsx) — a textured moon, a 60k-particle ring with the
- * same custom vertex/fragment shader patch, and a 75-piece orbiting asteroid
- * belt that pushes the ring's particles aside as it passes through them.
- * react-three-fiber and drei are React bindings with no equivalent in a
- * hand-rolled static HTML page, so this rebuilds the same scene directly on
- * three.js (loaded from THREE_CDN) — kept in exact sync with the React
- * version's constants/algorithms. One intentional simplification: drei's
- * `<Environment preset="city">` (an auto-fetched HDRI reflection map) is
- * skipped here in favor of plain directional/ambient lights, to avoid a
- * second fragile external asset dependency in the published output; the
- * moon and asteroids still read as correctly lit, just without the subtle
- * environment reflections the in-app preview has.
+ * Vanilla-three.js port of the prompt's LunarGravityCard scene — react-three-fiber
+ * and drei have no equivalent in a hand-rolled static page, so the same scene is
+ * rebuilt on three.js with the prompt's exact constants and behavior:
+ * Canvas camera [0,4,10] fov 45, dpr [1,2], shadows, sRGB + ACES (r3f defaults);
+ * drei OrbitControls defaults (damping on) with zoom/pan off, no auto-rotate;
+ * Environment "city"; the group tilted PI/8; the moon spinning 0.05 rad/s with
+ * a pointer cursor on hover; the particle ring and asteroid belt hidden until
+ * the moon is clicked, then forming (ring uProgress += 0.35/s; asteroids
+ * lerping in) exactly like ParticleRing/AsteroidBelt.
  */
 const LUNAR_INIT_JS = `
 (function(){
   var canvas = document.getElementById('lunar-canvas');
-  var renderer = new THREE.WebGLRenderer({ canvas: canvas, antialias: true, alpha: true });
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  var slot = document.getElementById('lunar-slot');
+  if (!canvas || !slot || !window.THREE) return;
+  var card = slot.parentElement;
+
+  var renderer = new THREE.WebGLRenderer({ canvas: canvas, antialias: true, alpha: true, powerPreference: 'high-performance' });
+  // Full-window canvas: cap the pixel ratio so a 60fps frame stays cheap.
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
   renderer.shadowMap.enabled = true;
-  // react-three-fiber's Canvas defaults to sRGB output + ACES filmic tone
-  // mapping; this r128 CDN build defaults to neither (linear output, no
-  // tone mapping), which is what actually made the published moon look
-  // flatter/greyer than the in-app preview — not the missing Environment
-  // HDRI mentioned above, which only adds subtle reflections. Matching the
-  // color pipeline here (not the scene/lighting/geometry) is what brings it
-  // back in line with the reference look.
+  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
   renderer.outputEncoding = THREE.sRGBEncoding;
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
   renderer.toneMappingExposure = 1;
 
   var scene = new THREE.Scene();
-  var camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 1000);
+  var camera = new THREE.PerspectiveCamera(45, 1, 0.1, 1000);
   camera.position.set(0, 4, 10);
-  camera.lookAt(0, 0, 0);
 
-  // Draggable (rotate only, matching the original card — no zoom/pan), mouse
-  // only: touches.ONE/TWO left null so a touch-drag on the page is never
-  // hijacked into orbiting the camera instead of scrolling.
   var controls = new THREE.OrbitControls(camera, renderer.domElement);
   controls.enableZoom = false;
   controls.enablePan = false;
-  controls.enableRotate = true;
+  controls.autoRotate = false;
   controls.enableDamping = true;
-  controls.dampingFactor = 0.08;
+  // The canvas now sits behind the whole page, so touch-drags must scroll
+  // the page rather than orbit the moon (OrbitControls sets touch-action:none).
   controls.touches = { ONE: null, TWO: null };
-  controls.addEventListener('start', function() { canvas.classList.add('dragging'); });
-  controls.addEventListener('end', function() { canvas.classList.remove('dragging'); });
+  canvas.style.touchAction = 'pan-y';
 
   function resize() {
-    camera.aspect = window.innerWidth / window.innerHeight;
-    camera.updateProjectionMatrix();
-    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.setSize(window.innerWidth, window.innerHeight, false);
   }
   resize();
   window.addEventListener('resize', resize);
+
+  // Scroll-driven hand-off from card to page background. At scrollY 0 the
+  // scene is framed and clipped exactly to the card's scene slot (identical
+  // to rendering it inside the card); over the first ~viewport of scrolling
+  // that frame eases out to the full window, and past that it simply stays
+  // fixed behind the story. camera.setViewOffset renders the slot-sized view
+  // at the slot's on-screen position within the full-window canvas.
+  var CARD_RADIUS = 40;
+  var lastClip = '';
+  var backgroundProgress = 0;
+  function near(a, b) { return Math.abs(a - b) < 2; }
+  function layout() {
+    var vw = window.innerWidth, vh = window.innerHeight;
+    var r = slot.getBoundingClientRect();
+    var c = card.getBoundingClientRect();
+    var p = Math.min(1, Math.max(0, window.scrollY / (vh * 0.85)));
+    var e = p * p * (3 - 2 * p);
+    backgroundProgress = e;
+    var x = r.left * (1 - e), y = r.top * (1 - e);
+    var w = r.width + (vw - r.width) * e, h = r.height + (vh - r.height) * e;
+    if (w < 1 || h < 1) return;
+    camera.aspect = w / h;
+    camera.setViewOffset(w, h, -x, -y, vw, vh);
+    camera.updateProjectionMatrix();
+    if (e >= 1) {
+      if (lastClip !== 'none') { canvas.style.clipPath = 'none'; lastClip = 'none'; }
+    } else {
+      // Round only the slot corners that coincide with the card's own
+      // rounded corners, easing to square as it opens up.
+      var rad = CARD_RADIUS * (1 - e);
+      var tl = near(r.left, c.left) && near(r.top, c.top) ? rad : 0;
+      var tr = near(r.right, c.right) && near(r.top, c.top) ? rad : 0;
+      var br = near(r.right, c.right) && near(r.bottom, c.bottom) ? rad : 0;
+      var bl = near(r.left, c.left) && near(r.bottom, c.bottom) ? rad : 0;
+      var clip = 'inset(' + y + 'px ' + (vw - x - w) + 'px ' + (vh - y - h) + 'px ' + x + 'px round ' +
+        tl + 'px ' + tr + 'px ' + br + 'px ' + bl + 'px)';
+      if (clip !== lastClip) { canvas.style.clipPath = clip; lastClip = clip; }
+    }
+  }
+
+  if (THREE.RGBELoader) {
+    var pmrem = new THREE.PMREMGenerator(renderer);
+    new THREE.RGBELoader().load('${LUNAR_CITY_HDR_URL}', function(hdr) {
+      scene.environment = pmrem.fromEquirectangular(hdr).texture;
+      hdr.dispose();
+      pmrem.dispose();
+    });
+  }
 
   scene.add(new THREE.AmbientLight(0xffffff, 0.02));
   var keyLight = new THREE.DirectionalLight(0xffffff, 1.5);
   keyLight.position.set(8, 5, 5);
   keyLight.castShadow = true;
-  keyLight.shadow.mapSize.set(2048, 2048);
+  keyLight.shadow.mapSize.set(1024, 1024);
   scene.add(keyLight);
   var rimLight = new THREE.DirectionalLight(0x4a90e2, 0.15);
   rimLight.position.set(-5, -3, -5);
@@ -789,6 +1093,7 @@ const LUNAR_INIT_JS = `
 
   var textureLoader = new THREE.TextureLoader();
   var moonTexture = textureLoader.load('${LUNAR_MOON_TEXTURE_URL}');
+  moonTexture.encoding = THREE.sRGBEncoding;
 
   var RADIUS = 2.0;
   var moon = new THREE.Mesh(
@@ -799,19 +1104,39 @@ const LUNAR_INIT_JS = `
   moon.receiveShadow = true;
   group.add(moon);
 
-  // Hover feedback: a subtle scale bump while the pointer is over the moon
-  // (matching RealisticMoon's React version — see lunar-gravity-card.tsx),
-  // detected via raycasting since a bare canvas has no built-in per-mesh
-  // pointer events the way react-three-fiber does.
+  // ringState: 'hidden' until the moon is clicked, then 'animating'.
+  var ringState = 'hidden';
+
   var raycaster = new THREE.Raycaster();
-  var pointerNdc = new THREE.Vector2(-10, -10);
-  var moonHover = 0;
-  window.addEventListener('mousemove', function(e) {
-    pointerNdc.x = (e.clientX / window.innerWidth) * 2 - 1;
-    pointerNdc.y = -(e.clientY / window.innerHeight) * 2 + 1;
+  var pointer = new THREE.Vector2();
+  function hitsMoon(e) {
+    var rect = canvas.getBoundingClientRect();
+    pointer.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+    pointer.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+    raycaster.setFromCamera(pointer, camera);
+    return raycaster.intersectObject(moon, false).length > 0;
+  }
+  var overMoon = false;
+  canvas.addEventListener('pointermove', function(e) {
+    var hit = hitsMoon(e);
+    if (hit !== overMoon) {
+      overMoon = hit;
+      document.body.style.cursor = hit ? 'pointer' : 'auto';
+    }
+  });
+  canvas.addEventListener('pointerleave', function() {
+    if (overMoon) { overMoon = false; document.body.style.cursor = 'auto'; }
+  });
+  // A click, not the end of an orbit drag (react-three-fiber likewise only
+  // fires onClick when the pointer barely moved between down and up).
+  var downX = 0, downY = 0;
+  canvas.addEventListener('pointerdown', function(e) { downX = e.clientX; downY = e.clientY; });
+  canvas.addEventListener('click', function(e) {
+    if (Math.abs(e.clientX - downX) + Math.abs(e.clientY - downY) > 4) return;
+    if (hitsMoon(e) && ringState === 'hidden') ringState = 'animating';
   });
 
-  var PARTICLE_COUNT = 60000;
+  var PARTICLE_COUNT = 48000;
   var ringPositions = new Float32Array(PARTICLE_COUNT * 3);
   var ringColors = new Float32Array(PARTICLE_COUNT * 3);
   var ringRandoms = new Float32Array(PARTICLE_COUNT);
@@ -846,30 +1171,52 @@ const LUNAR_INIT_JS = `
   ringGeometry.setAttribute('color', new THREE.BufferAttribute(ringColors, 3));
   ringGeometry.setAttribute('aRandom', new THREE.BufferAttribute(ringRandoms, 1));
 
-  var ringUniforms = { uAsteroids: { value: new Float32Array(75 * 4) }, time: { value: 0 } };
+  var ringUniforms = {
+    uProgress: { value: 0.0 },
+    uAsteroids: { value: new Float32Array(60 * 4) },
+    time: { value: 0 }
+  };
   var ringMaterial = new THREE.PointsMaterial({
     size: 0.008, vertexColors: true, transparent: true, opacity: 0.8,
     sizeAttenuation: true, blending: THREE.AdditiveBlending, depthWrite: false
   });
   ringMaterial.onBeforeCompile = function(shader) {
+    shader.uniforms.uProgress = ringUniforms.uProgress;
     shader.uniforms.uAsteroids = ringUniforms.uAsteroids;
     shader.uniforms.time = ringUniforms.time;
-    shader.vertexShader = 'uniform vec4 uAsteroids[75];\\nuniform float time;\\nattribute float aRandom;\\n' + shader.vertexShader;
+    shader.vertexShader = 'uniform float uProgress;\\nuniform vec4 uAsteroids[60];\\nuniform float time;\\nattribute float aRandom;\\nvarying float vProgress;\\n' + shader.vertexShader;
     shader.vertexShader = shader.vertexShader.replace('#include <begin_vertex>', \`
       vec3 transformed = vec3(position);
-      transformed.y += sin(atan(transformed.x, transformed.z) * 10.0 + time) * 0.05 * aRandom;
-      for(int i = 0; i < 75; i++) {
-        vec4 astData = uAsteroids[i];
-        vec3 delta = transformed - astData.xyz;
-        float dist = length(delta);
-        float rad = astData.w * 2.0 + 0.15;
-        if (dist < rad) {
-          float force = pow((rad - dist) / rad, 2.0);
-          transformed += normalize(delta) * force * 0.4;
-          transformed.y += force * 0.20 * (aRandom - 0.5);
+      float angle = atan(transformed.x, transformed.z);
+      float normalizedAngle = abs(angle) / 3.14159265359;
+      float spawnThreshold = 1.0 - normalizedAngle;
+      float progressValue = (uProgress * 1.4) - spawnThreshold;
+      float particleProgress = smoothstep(0.0, 0.4, progressValue);
+      vProgress = particleProgress;
+      transformed.y += sin(angle * 10.0 + time) * 0.05 * aRandom;
+      if (uProgress > 0.5) {
+        for(int i = 0; i < 60; i++) {
+          vec4 astData = uAsteroids[i];
+          vec3 delta = transformed - astData.xyz;
+          float dist = length(delta);
+          float rad = astData.w * 2.0 + 0.15;
+          if (dist < rad) {
+             float force = pow((rad - dist) / rad, 2.0);
+             transformed += normalize(delta) * force * 0.4;
+             transformed.y += force * 0.20 * (aRandom - 0.5);
+          }
         }
       }
+      float swirl = (1.0 - particleProgress) * 4.0;
+      float s = sin(swirl);
+      float c = cos(swirl);
+      transformed.xz = mat2(c, -s, s, c) * transformed.xz;
+      transformed.y += (1.0 - particleProgress) * (transformed.y >= 0.0 ? 1.0 : -1.0);
+      vec3 moonSurface = normalize(transformed) * 2.1;
+      transformed = mix(moonSurface, transformed, particleProgress);
     \`);
+    shader.fragmentShader = 'varying float vProgress;\\n' + shader.fragmentShader;
+    shader.fragmentShader = shader.fragmentShader.replace('#include <color_fragment>', '#include <color_fragment>\\n      diffuseColor.a *= vProgress;');
   };
   var ring = new THREE.Points(ringGeometry, ringMaterial);
   ring.rotation.set(-Math.PI / 2, 0, 0);
@@ -898,8 +1245,9 @@ const LUNAR_INIT_JS = `
     return data;
   }
 
-  var ASTEROID_COUNT = 75;
+  var ASTEROID_COUNT = 60;
   var asteroidTexture = textureLoader.load('${LUNAR_MOON_TEXTURE_URL}');
+  asteroidTexture.encoding = THREE.sRGBEncoding;
   var asteroids = generateAsteroids(ASTEROID_COUNT);
   var asteroidMesh = new THREE.InstancedMesh(
     new THREE.DodecahedronGeometry(1, 0),
@@ -908,31 +1256,134 @@ const LUNAR_INIT_JS = `
   );
   asteroidMesh.castShadow = true;
   asteroidMesh.receiveShadow = true;
+  asteroidMesh.visible = false;
   group.add(asteroidMesh);
 
   var massiveAsteroids = new Float32Array(ASTEROID_COUNT * 4);
   var dummy = new THREE.Object3D();
   var asteroidScale = 0;
 
-  var clock = { last: performance.now() / 1000 };
-  function tick() {
-    var now = performance.now() / 1000;
-    var delta = Math.min(0.1, now - clock.last);
-    clock.last = now;
+  // Drifting copies of the belt's largest asteroids, spread across the page
+  // once the moon becomes the background. The belt itself is untouched —
+  // these are extra meshes with the same geometry, material, size and spin.
+  // They live in camera space (the camera is added to the scene so its
+  // children render), so they stay spread across the screen however the
+  // moon is orbited. Each wanders on its own, gets pushed the opposite way
+  // to the moon's scroll-driven spin, and is nudged away by the pointer.
+  scene.add(camera);
+  var COMET_COUNT = 6;
+  var comets = asteroids.slice(0, COMET_COUNT).map(function(src) {
+    var mesh = new THREE.Mesh(asteroidMesh.geometry, asteroidMesh.material);
+    mesh.visible = false;
+    camera.add(mesh);
+    var heading = Math.random() * Math.PI * 2;
+    var cruise = 0.15 + Math.random() * 0.2;
+    return {
+      mesh: mesh, scale: src.scale, depth: 6 + Math.random() * 3,
+      u: Math.random() * 2 - 1, v: Math.random() * 2 - 1, x: null, y: null,
+      vx: Math.cos(heading) * cruise, vy: Math.sin(heading) * cruise,
+      heading: heading, cruise: cruise, turnIn: 2 + Math.random() * 5,
+      rx: src.rx, ry: src.ry, rz: src.rz, rsx: src.rsx, rsy: src.rsy, rsz: src.rsz
+    };
+  });
+  var pointerNdc = { x: 0, y: 0, active: false };
+  window.addEventListener('pointermove', function(e) {
+    pointerNdc.x = (e.clientX / window.innerWidth) * 2 - 1;
+    pointerNdc.y = -(e.clientY / window.innerHeight) * 2 + 1;
+    pointerNdc.active = true;
+  });
+  document.addEventListener('pointerleave', function() { pointerNdc.active = false; });
+  var lastScrollY = window.scrollY;
 
-    group.rotation.y += delta * 0.05;
-    moon.rotation.y += delta * 0.05;
-    ring.rotation.y -= delta * 0.02;
+  function updateComets(delta, scrollDelta) {
+    var visible = backgroundProgress > 0.02;
+    var tanHalf = Math.tan((camera.fov * Math.PI) / 360);
+    comets.forEach(function(c) {
+      c.mesh.visible = visible;
+      if (!visible) return;
+      var halfH = tanHalf * c.depth, halfW = halfH * camera.aspect, margin = 0.6;
+      if (c.x === null) { c.x = c.u * halfW; c.y = c.v * halfH; }
 
-    raycaster.setFromCamera(pointerNdc, camera);
-    var hovered = raycaster.intersectObject(moon, false).length > 0;
-    moonHover += ((hovered ? 1 : 0) - moonHover) * Math.min(1, delta * 6);
-    moon.scale.setScalar(1 + moonHover * 0.06);
+      // Random wander: every few seconds, steer towards a new heading.
+      c.turnIn -= delta;
+      if (c.turnIn <= 0) {
+        c.heading += (Math.random() - 0.5) * Math.PI * 1.5;
+        c.turnIn = 2 + Math.random() * 6;
+      }
+      var steer = Math.min(1, delta * 0.6);
+      c.vx += (Math.cos(c.heading) * c.cruise - c.vx) * steer;
+      c.vy += (Math.sin(c.heading) * c.cruise - c.vy) * steer;
 
+      // Scrolling spins the moon one way and throws the comets the other.
+      c.vx -= scrollDelta * 0.0015;
+
+      // Pointer nudges nearby comets away.
+      if (pointerNdc.active) {
+        var dx = c.x - pointerNdc.x * halfW, dy = c.y - pointerNdc.y * halfH;
+        var dist = Math.sqrt(dx * dx + dy * dy), reach = 1.6;
+        if (dist < reach && dist > 0.0001) {
+          var push = ((reach - dist) / reach) * 9 * delta;
+          c.vx += (dx / dist) * push;
+          c.vy += (dy / dist) * push;
+        }
+      }
+
+      c.x += c.vx * delta;
+      c.y += c.vy * delta;
+      if (c.x > halfW + margin) c.x = -halfW - margin; else if (c.x < -halfW - margin) c.x = halfW + margin;
+      if (c.y > halfH + margin) c.y = -halfH - margin; else if (c.y < -halfH - margin) c.y = halfH + margin;
+
+      var spin = delta * 60 * SPEED;
+      c.rx += c.rsx * spin; c.ry += c.rsy * spin; c.rz += c.rsz * spin;
+      c.mesh.position.set(c.x, c.y, -c.depth);
+      c.mesh.rotation.set(c.rx, c.ry, c.rz);
+      c.mesh.scale.setScalar(c.scale * backgroundProgress);
+    });
+  }
+
+  var SPEED = 0.6;
+  var moonScrollTarget = 0, moonScrollTurn = 0, smoothedScrollVelocity = 0;
+  var scratchMatrix = new THREE.Matrix4();
+  var scratchVector = new THREE.Vector3();
+  var localAsteroidBuffer = new Float32Array(ASTEROID_COUNT * 4);
+
+  var start = performance.now() / 1000;
+  var last = start;
+  function tick(timestamp) {
+    requestAnimationFrame(tick);
+    var now = (timestamp || performance.now()) / 1000;
+    var delta = Math.min(0.05, Math.max(0, now - last));
+    last = now;
+
+    layout();
+    // Once the moon leaves the card to become the page background, its ring
+    // and asteroid belt form on their own (clicking the moon in the hero
+    // still triggers it first, exactly as in the card).
+    if (backgroundProgress > 0.02 && ringState === 'hidden') ringState = 'animating';
+
+    var scrollDelta = window.scrollY - lastScrollY;
+    lastScrollY = window.scrollY;
+    // Per-frame rotation step for the asteroids' tumbling, frame-rate independent.
+    var spin = delta * 60 * SPEED;
+
+    // RealisticMoon: slow idle spin, plus a scroll-driven turn that eases
+    // towards its target (exponential smoothing) instead of jumping by
+    // each wheel notch — a wheel scroll arrives in ~100px steps, which read
+    // as the moon ratcheting round like a wheel.
+    moonScrollTarget += scrollDelta * 0.0012;
+    var ease = 1 - Math.exp(-delta * 3);
+    var moonScrollStep = (moonScrollTarget - moonScrollTurn) * ease;
+    moonScrollTurn += moonScrollStep;
+    moon.rotation.y += delta * 0.03 + moonScrollStep;
+    smoothedScrollVelocity += ((scrollDelta / Math.max(delta, 0.001)) - smoothedScrollVelocity) * ease;
+
+    // ParticleRing (reads the asteroid positions from the previous frame,
+    // same useFrame order as the React version: Moon, Ring, AsteroidBelt).
+    ring.rotation.y -= delta * 0.012;
     ring.updateMatrix();
-    var invMat = new THREE.Matrix4().copy(ring.matrix).invert();
-    var localAsteroids = new Float32Array(ASTEROID_COUNT * 4);
-    var v = new THREE.Vector3();
+    var invMat = scratchMatrix.copy(ring.matrix).invert();
+    var localAsteroids = localAsteroidBuffer;
+    var v = scratchVector;
     for (var i = 0; i < ASTEROID_COUNT; i++) {
       v.set(massiveAsteroids[i * 4], massiveAsteroids[i * 4 + 1], massiveAsteroids[i * 4 + 2]);
       v.applyMatrix4(invMat);
@@ -942,32 +1393,48 @@ const LUNAR_INIT_JS = `
       localAsteroids[i * 4 + 3] = massiveAsteroids[i * 4 + 3];
     }
     ringUniforms.uAsteroids.value = localAsteroids;
-    ringUniforms.time.value = now;
+    ringUniforms.time.value = (now - start) * SPEED;
+    if (ringState === 'animating') {
+      ringUniforms.uProgress.value = Math.min(1.0, ringUniforms.uProgress.value + delta * 0.35);
+    } else if (ringState === 'visible') {
+      ringUniforms.uProgress.value = 1.0;
+    } else {
+      ringUniforms.uProgress.value = 0.0;
+    }
 
-    asteroidScale += (1 - asteroidScale) * Math.min(1, delta * 2);
-    asteroids.forEach(function(ast, i) {
-      ast.angle += ast.speed * delta;
-      ast.phase += ast.radialSpeed * delta;
-      var currentRadius = ast.baseRadius + Math.sin(ast.phase) * ast.radialAmplitude;
-      if (currentRadius < 2.15) currentRadius = 2.15 + (2.15 - currentRadius) * 0.85;
-      var x = Math.cos(ast.angle) * currentRadius;
-      var y = Math.sin(ast.angle) * currentRadius;
-      massiveAsteroids[i * 4] = x;
-      massiveAsteroids[i * 4 + 1] = y;
-      massiveAsteroids[i * 4 + 2] = ast.zOffset;
-      massiveAsteroids[i * 4 + 3] = ast.scale;
-      ast.rx += ast.rsx; ast.ry += ast.rsy; ast.rz += ast.rsz;
-      dummy.position.set(x, y, ast.zOffset);
-      dummy.rotation.set(ast.rx, ast.ry, ast.rz);
-      dummy.scale.setScalar(ast.scale * asteroidScale);
-      dummy.updateMatrix();
-      asteroidMesh.setMatrixAt(i, dummy.matrix);
-    });
-    asteroidMesh.instanceMatrix.needsUpdate = true;
+    // AsteroidBelt
+    var targetScale = ringState === 'hidden' ? 0 : 1;
+    var lerpSpeed = ringState === 'hidden' ? 5 : 2;
+    asteroidScale = asteroidScale + (targetScale - asteroidScale) * (delta * lerpSpeed);
+    if (asteroidScale < 0.01) {
+      asteroidMesh.visible = false;
+    } else {
+      asteroidMesh.visible = true;
+      asteroids.forEach(function(ast, i) {
+        ast.angle += ast.speed * delta * SPEED;
+        ast.phase += ast.radialSpeed * delta * SPEED;
+        var currentRadius = ast.baseRadius + Math.sin(ast.phase) * ast.radialAmplitude;
+        if (currentRadius < 2.15) currentRadius = 2.15 + (2.15 - currentRadius) * 0.85;
+        var x = Math.cos(ast.angle) * currentRadius;
+        var y = Math.sin(ast.angle) * currentRadius;
+        massiveAsteroids[i * 4] = x;
+        massiveAsteroids[i * 4 + 1] = y;
+        massiveAsteroids[i * 4 + 2] = ast.zOffset;
+        massiveAsteroids[i * 4 + 3] = ast.scale;
+        ast.rx += ast.rsx * spin; ast.ry += ast.rsy * spin; ast.rz += ast.rsz * spin;
+        dummy.position.set(x, y, ast.zOffset);
+        dummy.rotation.set(ast.rx, ast.ry, ast.rz);
+        dummy.scale.setScalar(ast.scale * asteroidScale);
+        dummy.updateMatrix();
+        asteroidMesh.setMatrixAt(i, dummy.matrix);
+      });
+      asteroidMesh.instanceMatrix.needsUpdate = true;
+    }
+
+    updateComets(delta, smoothedScrollVelocity * delta);
 
     controls.update();
     renderer.render(scene, camera);
-    requestAnimationFrame(tick);
   }
   tick();
 })();
@@ -979,8 +1446,8 @@ function renderSpace(project: Project, avatars: Avatar[], supabaseUrl: string): 
     `
 .header{position:relative;padding:96px 32px 64px;}
 .header .kicker{font-size:.75rem;font-weight:300;text-transform:uppercase;letter-spacing:.4em;color:rgba(255,255,255,.3);}
-.header h1{margin:16px 0 0;max-width:760px;font-size:2.5rem;font-weight:500;line-height:1.2;}
-@media(min-width:768px){.header h1{font-size:3rem;}}
+.header h1{margin:16px 0 0;max-width:760px;font-size:1.5rem;font-weight:500;line-height:1.2;}
+@media(min-width:768px){.header h1{font-size:1.75rem;}}
 .section{position:relative;min-height:100vh;display:flex;flex-direction:column;align-items:center;gap:40px;border-top:1px solid rgba(255,255,255,.05);padding:80px 32px;box-sizing:border-box;}
 @media(min-width:768px){.section{flex-direction:row;gap:64px;padding:80px 64px;}}
 .section.reversed{flex-direction:column;}
@@ -992,13 +1459,14 @@ function renderSpace(project: Project, avatars: Avatar[], supabaseUrl: string): 
 .copy{opacity:0;transform:translateY(24px);width:100%;display:flex;flex-direction:column;gap:24px;border-radius:16px;border:1px solid rgba(255,255,255,.15);background:rgba(0,0,0,.4);box-shadow:0 8px 32px rgba(0,0,0,.35);padding:32px;box-sizing:border-box;}
 @media(min-width:768px){.copy{width:64%;}}
 .eyebrow{font-size:.75rem;font-weight:500;text-transform:uppercase;letter-spacing:.05em;color:rgba(255,255,255,.3);}
-.copy h2{font-size:1.5rem;font-weight:500;margin:0;}
-@media(min-width:768px){.copy h2{font-size:1.75rem;}}
-.big-text{font-weight:500;line-height:1.15;letter-spacing:-0.01em;font-size:clamp(1.5rem, 3.2vw, 3rem);margin:0;}
+.copy h2{font-size:1rem;font-weight:500;margin:0;}
+@media(min-width:768px){.copy h2{font-size:1.125rem;}}
+.big-text{font-weight:500;line-height:1.5;letter-spacing:-0.01em;font-size:clamp(0.9375rem, 1.25vw, 1.125rem);margin:0;}
 .word{color:rgba(255,255,255,.25);transition:color .15s;}
 .word.spoken{color:#fff;}
-audio{margin-top:8px;height:36px;max-width:360px;}
-` + AVATAR_BOX_CSS;
+` +
+  narrationGateCss({ isDark: true, accent: "#fff", border: "rgba(255,255,255,.15)" }) +
+  AVATAR_BOX_CSS;
 
   const sectionsHtml = project.chunks
     .map((chunk, index) => {
@@ -1014,7 +1482,7 @@ audio{margin-top:8px;height:36px;max-width:360px;}
     <span class="eyebrow">${String(index + 1).padStart(2, "0")} / ${String(project.chunks.length).padStart(2, "0")}</span>
     <h2>${escapeHtml(chunk.title)}</h2>
     <p class="big-text">${wordsHtml}</p>
-    ${src ? `<audio controls src="${src}"></audio>` : ""}
+    ${src ? `<audio src="${src}"></audio>` : ""}
   </div>
 </section>`;
     })
@@ -1024,6 +1492,7 @@ audio{margin-top:8px;height:36px;max-width:360px;}
 ${ASMR_MARKUP}
 <header class="header"><span class="kicker">Space</span><h1>${escapeHtml(project.title)}</h1></header>
 ${sectionsHtml}
+${narrationGateMarkup(hasChunkNarration(project, supabaseUrl), "space")}
 `;
 
   // Word-highlight scroll wiring (same mechanism as renderEditorial/renderCaseStudy)
@@ -1071,34 +1540,7 @@ function trackHighlight(audio, words) {
   currentHandler = onTimeUpdate;
 }
 
-function activateSection(section) {
-  var audio = section.querySelector('audio');
-  var words = Array.from(section.querySelectorAll('.word'));
-  if (currentAudio && currentAudio !== audio) currentAudio.pause();
-  stopHighlightTracking();
-  if (audio) {
-    audio.currentTime = 0;
-    audio.play().catch(function(){});
-    currentAudio = audio;
-    trackHighlight(audio, words);
-  }
-}
-
-document.querySelectorAll('.section').forEach(function(section){
-  var audio = section.querySelector('audio');
-  ScrollTrigger.create({
-    trigger: section, start: 'top center', end: 'bottom center',
-    onEnter: function(){ activateSection(section); },
-    onEnterBack: function(){ activateSection(section); },
-    onLeave: function(){ if (audio) audio.pause(); },
-    onLeaveBack: function(){ if (audio) audio.pause(); }
-  });
-  gsap.fromTo(section.querySelector('.copy'), {opacity:0, y:24}, {
-    opacity:1, y:0, duration:0.6, ease:'power2.out',
-    scrollTrigger:{trigger:section, start:'top 75%'}
-  });
-});
-` + ASMR_INIT_JS;
+` + SCROLL_NARRATION_JS + ASMR_INIT_JS;
 
   const needsModel = needsAvatarModel(avatars);
   return documentWrap(
@@ -1116,8 +1558,8 @@ function renderLunar(project: Project, avatars: Avatar[], supabaseUrl: string): 
     `
 .header{position:relative;padding:96px 32px 64px;}
 .header .kicker{font-size:.75rem;font-weight:300;text-transform:uppercase;letter-spacing:.4em;color:rgba(103,232,249,.4);}
-.header h1{margin:16px 0 0;max-width:760px;font-size:2.5rem;font-weight:500;line-height:1.2;}
-@media(min-width:768px){.header h1{font-size:3rem;}}
+.header h1{margin:16px 0 0;max-width:760px;font-size:1.5rem;font-weight:500;line-height:1.2;}
+@media(min-width:768px){.header h1{font-size:1.75rem;}}
 .section{position:relative;min-height:100vh;display:flex;flex-direction:column;align-items:center;gap:40px;border-top:1px solid rgba(34,211,238,.1);padding:80px 32px;box-sizing:border-box;}
 @media(min-width:768px){.section{flex-direction:row;gap:64px;padding:80px 64px;}}
 .section.reversed{flex-direction:column;}
@@ -1129,13 +1571,14 @@ function renderLunar(project: Project, avatars: Avatar[], supabaseUrl: string): 
 .copy{opacity:0;transform:translateY(24px);width:100%;display:flex;flex-direction:column;gap:24px;border-radius:16px;border:1px solid rgba(103,232,249,.2);background:rgba(0,0,0,.4);box-shadow:0 8px 32px rgba(0,0,0,.35);padding:32px;box-sizing:border-box;}
 @media(min-width:768px){.copy{width:64%;}}
 .eyebrow{font-size:.75rem;font-weight:500;text-transform:uppercase;letter-spacing:.05em;color:rgba(165,243,252,.5);}
-.copy h2{font-size:1.5rem;font-weight:500;margin:0;}
-@media(min-width:768px){.copy h2{font-size:1.75rem;}}
-.big-text{font-weight:500;line-height:1.15;letter-spacing:-0.01em;font-size:clamp(1.5rem, 3.2vw, 3rem);margin:0;}
+.copy h2{font-size:1rem;font-weight:500;margin:0;}
+@media(min-width:768px){.copy h2{font-size:1.125rem;}}
+.big-text{font-weight:500;line-height:1.5;letter-spacing:-0.01em;font-size:clamp(0.9375rem, 1.25vw, 1.125rem);margin:0;}
 .word{color:rgba(255,255,255,.25);transition:color .15s;}
 .word.spoken{color:#fff;}
-audio{margin-top:8px;height:36px;max-width:360px;}
-` + AVATAR_BOX_CSS;
+` +
+    narrationGateCss({ isDark: true, accent: "#67e8f9", border: "rgba(103,232,249,.2)" }) +
+    AVATAR_BOX_CSS;
 
   const sectionsHtml = project.chunks
     .map((chunk, index) => {
@@ -1155,16 +1598,16 @@ audio{margin-top:8px;height:36px;max-width:360px;}
     <span class="eyebrow">${String(index + 1).padStart(2, "0")} / ${String(project.chunks.length).padStart(2, "0")}</span>
     <h2>${escapeHtml(chunk.title)}</h2>
     <p class="big-text">${wordsHtml}</p>
-    ${src ? `<audio controls src="${src}"></audio>` : ""}
+    ${src ? `<audio src="${src}"></audio>` : ""}
   </div>
 </section>`;
     })
     .join("\n");
 
   const body = `
-${LUNAR_MARKUP}
-<header class="header"><span class="kicker">Lunar</span><h1>${escapeHtml(project.title)}</h1></header>
+${lunarCardHeroMarkup(project.title, lunarHeroDescription(project.chunks[0]?.narrativeText))}
 ${sectionsHtml}
+${narrationGateMarkup(hasChunkNarration(project, supabaseUrl), "lunar")}
 `;
 
   // Word-highlight scroll wiring (same mechanism as renderSpace/renderCaseStudy)
@@ -1198,40 +1641,7 @@ function trackHighlight(audio, words) {
   currentHandler = onTimeUpdate;
 }
 
-function activateSection(section) {
-  var audio = section.querySelector('audio');
-  var words = Array.from(section.querySelectorAll('.word'));
-  if (currentAudio && currentAudio !== audio) currentAudio.pause();
-  stopHighlightTracking();
-  if (audio) {
-    audio.currentTime = 0;
-    audio.play().catch(function(){});
-    currentAudio = audio;
-    trackHighlight(audio, words);
-  }
-  var video = section.querySelector('video');
-  if (video) {
-    video.currentTime = 0;
-    video.play().catch(function(){});
-  }
-}
-
-document.querySelectorAll('.section').forEach(function(section){
-  var audio = section.querySelector('audio');
-  var video = section.querySelector('video');
-  ScrollTrigger.create({
-    trigger: section, start: 'top center', end: 'bottom center',
-    onEnter: function(){ activateSection(section); },
-    onEnterBack: function(){ activateSection(section); },
-    onLeave: function(){ if (audio) audio.pause(); if (video) video.pause(); },
-    onLeaveBack: function(){ if (audio) audio.pause(); if (video) video.pause(); }
-  });
-  gsap.fromTo(section.querySelector('.copy'), {opacity:0, y:24}, {
-    opacity:1, y:0, duration:0.6, ease:'power2.out',
-    scrollTrigger:{trigger:section, start:'top 75%'}
-  });
-});
-` + LUNAR_INIT_JS;
+` + SCROLL_NARRATION_JS + LUNAR_INIT_JS;
 
   // Lunar prefers video over the 3D model (see sectionsHtml above), so the
   // GLTFLoader/OrbitControls CDN scripts are only worth loading here for an
@@ -1242,7 +1652,7 @@ document.querySelectorAll('.section').forEach(function(section){
     css,
     body,
     js + (usesModelInLunar ? AVATAR3D_INIT_JS : ""),
-    dedupeScripts([THREE_CDN, ORBIT_CONTROLS_CDN, ...(usesModelInLunar ? AVATAR_MODEL_CDN_SCRIPTS : [])])
+    dedupeScripts([...LUNAR_SCRIPTS, ...(usesModelInLunar ? AVATAR_MODEL_CDN_SCRIPTS : [])])
   );
 }
 
@@ -1260,8 +1670,8 @@ body{margin:0;font-family:-apple-system,'Segoe UI',sans-serif;background:#05070d
 #airlock-title-wrap,#airlock-tagline-wrap{pointer-events:none;position:absolute;inset:0;display:flex;align-items:center;justify-content:center;text-align:center;}
 #airlock-title-wrap{padding:0 6%;}
 #airlock-tagline-wrap{padding:0 8%;opacity:0;}
-#airlock-title-wrap h1{display:inline-block;margin:0;font-weight:800;line-height:1;letter-spacing:-0.02em;font-family:${AIRLOCK_SANS};font-size:clamp(30px,7vw,96px);color:#f2f4f8;text-shadow:0 4px 30px rgba(0,0,0,.55);will-change:transform,filter,opacity;}
-#airlock-tagline-wrap p{margin:0;font-weight:700;letter-spacing:-0.01em;font-family:${AIRLOCK_SANS};font-size:clamp(20px,3.4vw,40px);line-height:1.2;color:#f2f4f8;text-shadow:0 4px 24px rgba(0,0,0,.6);}
+#airlock-title-wrap h1{display:inline-block;margin:0;font-weight:800;line-height:1;letter-spacing:-0.02em;font-family:${AIRLOCK_SANS};font-size:clamp(26px,5vw,64px);color:#f2f4f8;text-shadow:0 4px 30px rgba(0,0,0,.55);will-change:transform,filter,opacity;}
+#airlock-tagline-wrap p{margin:0;font-weight:700;letter-spacing:-0.01em;font-family:${AIRLOCK_SANS};font-size:clamp(16px,2.6vw,28px);line-height:1.2;color:#f2f4f8;text-shadow:0 4px 24px rgba(0,0,0,.6);}
 #airlock-hint{pointer-events:none;position:absolute;bottom:clamp(20px,6vh,48px);left:50%;transform:translateX(-50%);display:flex;flex-direction:column;align-items:center;gap:8px;transition:opacity .4s;color:rgba(242,244,248,.72);font-family:${AIRLOCK_SANS};font-size:clamp(10px,1.4vw,12px);font-weight:600;letter-spacing:.3em;}
 #airlock-hint svg{animation:airlock-bounce 1.6s ease-in-out infinite;}
 @keyframes airlock-bounce{0%,100%{transform:translateY(0);opacity:.5;}50%{transform:translateY(5px);opacity:1;}}
@@ -1281,13 +1691,14 @@ body{margin:0;font-family:-apple-system,'Segoe UI',sans-serif;background:#05070d
 .copy{opacity:0;transform:translateY(24px);width:100%;display:flex;flex-direction:column;gap:24px;border-radius:16px;border:1px solid rgba(255,255,255,.15);background:rgba(0,0,0,.4);box-shadow:0 8px 32px rgba(0,0,0,.35);padding:32px;box-sizing:border-box;}
 @media(min-width:768px){.copy{width:64%;}}
 .eyebrow{font-size:.75rem;font-weight:500;text-transform:uppercase;letter-spacing:.05em;color:rgba(255,255,255,.3);}
-.copy h2{font-size:1.5rem;font-weight:500;margin:0;}
-@media(min-width:768px){.copy h2{font-size:1.75rem;}}
-.big-text{font-weight:500;line-height:1.15;letter-spacing:-0.01em;font-size:clamp(1.5rem, 3.2vw, 3rem);margin:0;}
+.copy h2{font-size:1rem;font-weight:500;margin:0;}
+@media(min-width:768px){.copy h2{font-size:1.125rem;}}
+.big-text{font-weight:500;line-height:1.5;letter-spacing:-0.01em;font-size:clamp(0.9375rem, 1.25vw, 1.125rem);margin:0;}
 .word{color:rgba(255,255,255,.25);transition:color .15s;}
 .word.spoken{color:#fff;}
-audio{margin-top:8px;height:36px;max-width:360px;}
-` + AVATAR_BOX_CSS;
+` +
+  narrationGateCss({ isDark: true, accent: "#fff", border: "rgba(255,255,255,.15)" }) +
+  AVATAR_BOX_CSS;
 
 function airlockHeroMarkup(title: string): string {
   return `
@@ -1476,7 +1887,7 @@ function renderAirlock(project: Project, avatars: Avatar[], supabaseUrl: string)
     <span class="eyebrow">${String(index + 1).padStart(2, "0")} / ${String(project.chunks.length).padStart(2, "0")}</span>
     <h2>${escapeHtml(chunk.title)}</h2>
     <p class="big-text">${wordsHtml}</p>
-    ${src ? `<audio controls src="${src}"></audio>` : ""}
+    ${src ? `<audio src="${src}"></audio>` : ""}
   </div>
 </section>`;
     })
@@ -1485,6 +1896,7 @@ function renderAirlock(project: Project, avatars: Avatar[], supabaseUrl: string)
   const body = `
 ${airlockHeroMarkup(project.title)}
 ${sectionsHtml}
+${narrationGateMarkup(hasChunkNarration(project, supabaseUrl), "airlock")}
 `;
 
   const js = `
@@ -1515,34 +1927,7 @@ function trackHighlight(audio, words) {
   currentHandler = onTimeUpdate;
 }
 
-function activateSection(section) {
-  var audio = section.querySelector('audio');
-  var words = Array.from(section.querySelectorAll('.word'));
-  if (currentAudio && currentAudio !== audio) currentAudio.pause();
-  stopHighlightTracking();
-  if (audio) {
-    audio.currentTime = 0;
-    audio.play().catch(function(){});
-    currentAudio = audio;
-    trackHighlight(audio, words);
-  }
-}
-
-document.querySelectorAll('.section').forEach(function(section){
-  var audio = section.querySelector('audio');
-  ScrollTrigger.create({
-    trigger: section, start: 'top center', end: 'bottom center',
-    onEnter: function(){ activateSection(section); },
-    onEnterBack: function(){ activateSection(section); },
-    onLeave: function(){ if (audio) audio.pause(); },
-    onLeaveBack: function(){ if (audio) audio.pause(); }
-  });
-  gsap.fromTo(section.querySelector('.copy'), {opacity:0, y:24}, {
-    opacity:1, y:0, duration:0.6, ease:'power2.out',
-    scrollTrigger:{trigger:section, start:'top 75%'}
-  });
-});
-` + AIRLOCK_INIT_JS;
+` + SCROLL_NARRATION_JS + AIRLOCK_INIT_JS;
 
   const needsModel = needsAvatarModel(avatars);
   return documentWrap(
@@ -1598,8 +1983,8 @@ function renderCaseStudy(project: Project, avatars: Avatar[], supabaseUrl: strin
     `
 .header{${isDark ? "position:relative;" : ""}padding:96px 32px 64px;}
 .header .kicker{font-size:.75rem;text-transform:uppercase;letter-spacing:${isDark ? ".4em" : ".05em"};font-weight:${isDark ? "300" : "400"};color:${kickerColor};}
-.header h1{margin:12px 0 0;max-width:760px;font-size:2.5rem;font-weight:500;line-height:1.2;}
-@media(min-width:768px){.header h1{font-size:3rem;}}
+.header h1{margin:12px 0 0;max-width:760px;font-size:1.5rem;font-weight:500;line-height:1.2;}
+@media(min-width:768px){.header h1{font-size:1.75rem;}}
 .section{${isDark ? "position:relative;" : ""}min-height:100vh;display:flex;flex-direction:column;align-items:center;gap:40px;border-top:1px solid ${borderColor};padding:80px 32px;box-sizing:border-box;}
 @media(min-width:768px){.section{flex-direction:row;gap:64px;padding:80px 64px;}}
 .section.reversed{flex-direction:column;}
@@ -1615,13 +2000,14 @@ function renderCaseStudy(project: Project, avatars: Avatar[], supabaseUrl: strin
     }}
 @media(min-width:768px){.copy{width:64%;}}
 .eyebrow{font-size:.75rem;font-weight:500;text-transform:uppercase;letter-spacing:.05em;color:${eyebrowColor};}
-.copy h2{font-size:1.5rem;font-weight:500;margin:0;}
-@media(min-width:768px){.copy h2{font-size:1.75rem;}}
-.big-text{font-weight:500;line-height:1.15;letter-spacing:-0.01em;font-size:clamp(${isDark ? "1.5rem, 3.2vw, 3rem" : "1.75rem, 4.6vw, 5rem"});margin:0;}
+.copy h2{font-size:1rem;font-weight:500;margin:0;}
+@media(min-width:768px){.copy h2{font-size:1.125rem;}}
+.big-text{font-weight:500;line-height:1.5;letter-spacing:-0.01em;font-size:clamp(0.9375rem, 1.25vw, 1.125rem);margin:0;}
 .word{color:${isDark ? "rgba(255,255,255,.25)" : "#d4d4d4"};transition:color .15s;}
 .word.spoken{color:${isDark ? "#fff" : "#171717"};}
-audio{margin-top:8px;height:36px;max-width:360px;}
-` + AVATAR_BOX_CSS;
+` +
+    narrationGateCss({ isDark, accent: theme === "lunar" ? "#67e8f9" : "#fff", border: panelBorderColor }) +
+    AVATAR_BOX_CSS;
 
   const sectionsHtml = sections
     .map((section, index) => {
@@ -1642,24 +2028,29 @@ audio{margin-top:8px;height:36px;max-width:360px;}
     <span class="eyebrow">${escapeHtml(section.sectionLabel)}</span>
     <h2>${escapeHtml(section.title)}</h2>
     <p class="big-text">${wordsHtml}</p>
-    ${src ? `<audio controls src="${src}"></audio>` : ""}
+    ${src ? `<audio src="${src}"></audio>` : ""}
   </div>
 </section>`;
     })
     .join("\n");
 
-  const backdropMarkup = theme === "space" ? ASMR_MARKUP : theme === "lunar" ? LUNAR_MARKUP : "";
+  const backdropMarkup = theme === "space" ? ASMR_MARKUP : "";
   // Airlock's hero replaces the plain header entirely (it already carries the
   // title in its own full-screen intro) rather than sitting behind it like
   // the Space/Lunar backdrops do — see CaseStudyTemplate.tsx's equivalent branch.
   const headerOrHero =
     theme === "airlock"
       ? airlockHeroMarkup(project.title)
-      : `${backdropMarkup}\n<header class="header"><span class="kicker">${kicker}</span><h1>${escapeHtml(project.title)}</h1></header>`;
+      : theme === "lunar"
+        ? lunarCardHeroMarkup(project.title, lunarHeroDescription(sections[0]?.body))
+        : `${backdropMarkup}\n<header class="header"><span class="kicker">${kicker}</span><h1>${escapeHtml(project.title)}</h1></header>`;
+
+  const hasNarration = sections.some((section) => sectionAudioUrl(supabaseUrl, project.id, section, sectionAudio));
 
   const body = `
 ${headerOrHero}
 ${sectionsHtml}
+${narrationGateMarkup(hasNarration, theme)}
 `;
 
   const js = `
@@ -1704,40 +2095,7 @@ function trackHighlight(audio, words) {
   currentHandler = onTimeUpdate;
 }
 
-function activateSection(section) {
-  var audio = section.querySelector('audio');
-  var words = Array.from(section.querySelectorAll('.word'));
-  if (currentAudio && currentAudio !== audio) currentAudio.pause();
-  stopHighlightTracking();
-  if (audio) {
-    audio.currentTime = 0;
-    audio.play().catch(function(){});
-    currentAudio = audio;
-    trackHighlight(audio, words);
-  }
-  var video = section.querySelector('video');
-  if (video) {
-    video.currentTime = 0;
-    video.play().catch(function(){});
-  }
-}
-
-document.querySelectorAll('.section').forEach(function(section){
-  var audio = section.querySelector('audio');
-  var video = section.querySelector('video');
-  ScrollTrigger.create({
-    trigger: section, start: 'top center', end: 'bottom center',
-    onEnter: function(){ activateSection(section); },
-    onEnterBack: function(){ activateSection(section); },
-    onLeave: function(){ if (audio) audio.pause(); if (video) video.pause(); },
-    onLeaveBack: function(){ if (audio) audio.pause(); if (video) video.pause(); }
-  });
-  gsap.fromTo(section.querySelector('.copy'), {opacity:0, y:24}, {
-    opacity:1, y:0, duration:0.6, ease:'power2.out',
-    scrollTrigger:{trigger:section, start:'top 75%'}
-  });
-});
-` + (theme === "space" ? ASMR_INIT_JS : theme === "lunar" ? LUNAR_INIT_JS : theme === "airlock" ? AIRLOCK_INIT_JS : "");
+` + SCROLL_NARRATION_JS + (theme === "space" ? ASMR_INIT_JS : theme === "lunar" ? LUNAR_INIT_JS : theme === "airlock" ? AIRLOCK_INIT_JS : "");
 
   // Lunar prefers video over the 3D model (see sectionsHtml above), so the
   // GLTFLoader/OrbitControls CDN scripts are only worth loading here for an
@@ -1746,7 +2104,7 @@ document.querySelectorAll('.section').forEach(function(section){
     theme === "lunar"
       ? avatars.some((avatar) => avatar.modelUrl && (!avatar.videoUrls || avatar.videoUrls.length === 0))
       : needsAvatarModel(avatars);
-  const themeScripts = theme === "lunar" ? [THREE_CDN, ORBIT_CONTROLS_CDN] : [];
+  const themeScripts = theme === "lunar" ? LUNAR_SCRIPTS : [];
   return documentWrap(
     project.title,
     css,
@@ -1756,7 +2114,12 @@ document.querySelectorAll('.section').forEach(function(section){
   );
 }
 
-export function renderStaticSite(project: Project, avatars: Avatar[], supabaseUrl: string): string {
+export function renderStaticSite(
+  project: Project,
+  avatars: Avatar[],
+  supabaseUrl: string,
+  options: { voyage?: VoyageSiteOptions } = {}
+): string {
   // Case-study projects always publish their bound layout — Company/Domain/
   // Customer/Problem/Solution/Impact — never the generic chunk-based
   // templates below, regardless of selectedTemplateId.
@@ -1775,6 +2138,8 @@ export function renderStaticSite(project: Project, avatars: Avatar[], supabaseUr
       return renderLunar(project, avatars, supabaseUrl);
     case "airlock":
       return renderAirlock(project, avatars, supabaseUrl);
+    case "voyage":
+      return renderVoyage(project, avatars, supabaseUrl, options.voyage);
     case "editorial":
     default:
       return renderEditorial(project, avatars, supabaseUrl);

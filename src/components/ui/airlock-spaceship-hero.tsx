@@ -380,7 +380,7 @@ export default function AirlockHero({
                     className="inline-block font-extrabold leading-none tracking-[-0.02em]"
                     style={{
                         fontFamily: SANS,
-                        fontSize: "clamp(30px, 7vw, 96px)",
+                        fontSize: "clamp(26px, 5vw, 64px)",
                         color: palette.text,
                         textShadow: "0 4px 30px rgba(0,0,0,0.55)",
                         willChange: "transform, filter, opacity",
@@ -398,7 +398,7 @@ export default function AirlockHero({
                         className="font-bold tracking-[-0.01em]"
                         style={{
                             fontFamily: SANS,
-                            fontSize: "clamp(20px, 3.4vw, 40px)",
+                            fontSize: "clamp(16px, 2.6vw, 28px)",
                             lineHeight: 1.2,
                             color: palette.text,
                             textShadow: "0 4px 24px rgba(0,0,0,0.6)",

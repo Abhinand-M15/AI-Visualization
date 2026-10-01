@@ -1,6 +1,8 @@
 import { getSupabase } from "@/lib/db";
 import { generateLipsyncVideo } from "@/lib/wav2lip";
-import { PROJECT_SELECT_COLUMNS, rowToProject, type ProjectRow } from "@/lib/projects";
+import { buildPayload, PROJECT_SELECT_COLUMNS, rowToProject, updatedByFields, type ProjectRow } from "@/lib/projects";
+import { requireUser, unauthorizedResponse, type AppUser } from "@/lib/auth/session";
+import { logActivity } from "@/lib/activity";
 import { flattenCaseStudySections } from "@/lib/caseStudySections";
 import { AVATARS } from "@/lib/avatars";
 import { mapWithConcurrency, withRetry } from "@/lib/concurrency";
@@ -17,15 +19,21 @@ const DEFAULT_APP_BASE_URL = "http://localhost:3000";
 const MAX_CONCURRENT_REQUESTS = 1;
 
 export async function POST(request: Request, context: { params: Promise<{ id: string }> }) {
+  let user: AppUser | null;
+  try {
+    user = await requireUser();
+  } catch (error) {
+    const unauthorized = unauthorizedResponse(error);
+    if (unauthorized) return unauthorized;
+    throw error;
+  }
   const { id } = await context.params;
 
   return createNdjsonStream(async (send) => {
     const supabase = getSupabase();
-    const { data: existing, error: fetchError } = await supabase
-      .from("projects")
-      .select(PROJECT_SELECT_COLUMNS)
-      .eq("id", id)
-      .maybeSingle();
+    let fetchQuery = supabase.from("projects").select(PROJECT_SELECT_COLUMNS).eq("id", id);
+    if (user) fetchQuery = fetchQuery.eq("owner_id", user.id);
+    const { data: existing, error: fetchError } = await fetchQuery.maybeSingle();
 
     if (fetchError) throw new Error(fetchError.message);
     if (!existing) throw new Error("Project not found.");
@@ -100,20 +108,22 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
       if (result) sectionVideo[result.key] = result.url;
     }
 
-    const { data: updated, error: updateError } = await supabase
+    let updateQuery = supabase
       .from("projects")
       .update({
-        payload: {
+        payload: buildPayload(project, {
           chunks: project.chunks,
           caseStudyBinding: { ...project.caseStudyBinding, sectionVideo },
-        },
+        }),
         updated_at: new Date().toISOString(),
+        ...updatedByFields(user),
       })
-      .eq("id", id)
-      .select(PROJECT_SELECT_COLUMNS)
-      .single();
+      .eq("id", id);
+    if (user) updateQuery = updateQuery.eq("owner_id", user.id);
+    const { data: updated, error: updateError } = await updateQuery.select(PROJECT_SELECT_COLUMNS).single();
 
     if (updateError) throw new Error(updateError.message);
+    await logActivity(user, id, "video.generated", { requested: sections.length, failed: failures.length });
     send({
       type: "done",
       project: rowToProject(updated as unknown as ProjectRow),

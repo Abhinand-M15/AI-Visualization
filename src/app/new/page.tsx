@@ -1,22 +1,19 @@
 "use client";
 
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
 import { useDraftStore } from "@/lib/store";
-import type { DocumentType } from "@/lib/types";
-import { ACCEPTED_DOCUMENT_EXTENSIONS } from "@/lib/types";
+import { DOCUMENT_TYPES, type DocumentType } from "@/lib/types";
 import { SpaceBackdrop } from "@/components/SpaceBackdrop";
 import { LoadingBar } from "@/components/LoadingBar";
-
-const DOCUMENT_TYPES: { value: DocumentType; label: string }[] = [
-  { value: "case-study", label: "Case study" },
-  { value: "brd", label: "BRD" },
-  { value: "other", label: "Other" },
-];
+import { UPLOAD_EXTENSIONS } from "@/app/api/uploads/shared";
+import { useApiKeyGate } from "@/app/settings/useApiKeyGate";
 
 export default function NewStoryPage() {
   const router = useRouter();
-  const { storyline, status, errorMessage, generate, editChunk, revise, save, reset } = useDraftStore();
+  const { storyline, status, errorMessage, errorCode, generate, editChunk, revise, save, reset } = useDraftStore();
+  useApiKeyGate();
 
   const [documentType, setDocumentType] = useState<DocumentType>("case-study");
   const [file, setFile] = useState<File | null>(null);
@@ -82,13 +79,13 @@ export default function NewStoryPage() {
             </label>
             <input
               type="file"
-              accept={ACCEPTED_DOCUMENT_EXTENSIONS.join(",")}
+              accept={UPLOAD_EXTENSIONS.join(",")}
               disabled={isBusy}
               onChange={(event) => setFile(event.target.files?.[0] ?? null)}
               className="block w-full cursor-pointer rounded-xl border border-dashed border-neutral-300 bg-neutral-50 p-5 text-lg text-neutral-600 file:mr-4 file:cursor-pointer file:rounded-full file:border-0 file:bg-neutral-200 file:px-5 file:py-2.5 file:text-lg file:font-medium file:text-neutral-800 dark:border-white/20 dark:bg-white/[0.02] dark:text-indigo-100/80 dark:file:bg-white/10 dark:file:text-white"
             />
             <p className="mt-3 text-base text-neutral-500 dark:text-indigo-200/50">
-              Accepted: PDF, PPTX, XLSX.
+              Accepted: PDF, PPTX, XLSX, DOCX, TXT, MD.
             </p>
           </div>
 
@@ -131,6 +128,14 @@ export default function NewStoryPage() {
         <section className="rounded-3xl border border-red-300 bg-red-50 p-6 text-lg text-red-700 dark:border-red-500/30 dark:bg-red-500/10 dark:text-red-200">
           <p className="text-xl font-medium">Something went wrong</p>
           <p className="mt-2">{errorMessage}</p>
+          {errorCode === "missing_api_key" && (
+            <Link
+              href="/settings?onboarding=1"
+              className="mt-4 mr-3 inline-block rounded-full border border-red-300 px-5 py-2.5 text-base font-medium dark:border-red-400/40"
+            >
+              Open Settings
+            </Link>
+          )}
           <button
             type="button"
             onClick={reset}
