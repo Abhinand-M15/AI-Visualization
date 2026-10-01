@@ -186,7 +186,7 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
         )
       )
     );
-    const isVoyage = !isCaseStudy && project.selectedTemplateId === "voyage";
+    const isVoyage = project.selectedTemplateId === "voyage";
     // Optional own music: public/themes/voyage/audio/{calm,tense,bright}.mp3 replace
     // the generated beds for those moods.
     const voyageMusic = isVoyage ? await findVoyageMusic(baseUrl) : {};

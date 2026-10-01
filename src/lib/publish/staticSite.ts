@@ -1,6 +1,6 @@
 import type { Chunk, Project } from "@/lib/types";
 import { avatarVideoFallbackUrl, getAvatarImage, type Avatar } from "@/lib/avatars";
-import { flattenCaseStudySections, type CaseStudySection } from "@/lib/caseStudySections";
+import { caseStudySectionsAsChunks, flattenCaseStudySections, type CaseStudySection } from "@/lib/caseStudySections";
 import { lunarHeroDescription, lunarHeroTitleParts, lunarHeroTitleSize } from "@/lib/lunarHero";
 import {
   NARRATION_DOCK_CSS,
@@ -2124,6 +2124,12 @@ export function renderStaticSite(
   // Customer/Problem/Solution/Impact — never the generic chunk-based
   // templates below, regardless of selectedTemplateId.
   if (project.documentType === "case-study" && project.caseStudyBinding?.slots) {
+    // Voyage is chunk-based: feed it the case study's sections as chapters.
+    if (project.selectedTemplateId === "voyage") {
+      const sections = flattenCaseStudySections(project.caseStudyBinding.slots);
+      const chunks = caseStudySectionsAsChunks(sections, project.caseStudyBinding.sectionAudio);
+      return renderVoyage({ ...project, chunks }, avatars, supabaseUrl, options.voyage);
+    }
     return renderCaseStudy(project, avatars, supabaseUrl);
   }
 

@@ -6,7 +6,7 @@ import type { Project } from "@/lib/types";
 import { AVATARS } from "@/lib/avatars";
 import { TEMPLATE_COMPONENTS } from "@/components/templates";
 import CaseStudyTemplate from "@/components/templates/CaseStudyTemplate";
-import { flattenCaseStudySections } from "@/lib/caseStudySections";
+import { caseStudySectionsAsChunks, flattenCaseStudySections } from "@/lib/caseStudySections";
 
 export default function PreviewPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
@@ -56,6 +56,21 @@ export default function PreviewPage({ params }: { params: Promise<{ id: string }
       </Link>
     </div>
   );
+
+  // Voyage is chunk-based, so a case study shows its sections as Voyage chapters.
+  if (isCaseStudy && project.selectedTemplateId === "voyage" && caseStudySections.length > 0 && avatars.length > 0) {
+    const VoyageComponent = TEMPLATE_COMPONENTS.voyage;
+    return (
+      <div>
+        {backLink}
+        <VoyageComponent
+          title={project.title}
+          chunks={caseStudySectionsAsChunks(caseStudySections, project.caseStudyBinding?.sectionAudio)}
+          avatars={avatars}
+        />
+      </div>
+    );
+  }
 
   if (isCaseStudy) {
     if (caseStudySections.length === 0 || avatars.length === 0) {

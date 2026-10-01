@@ -1,4 +1,4 @@
-import type { EmotionKey } from "@/lib/types";
+import type { Chunk, EmotionKey } from "@/lib/types";
 
 /**
  * A single narratable moment in the published case-study experience —
@@ -70,6 +70,25 @@ function asText(value: unknown): string | null {
  * — a missing section here means the source genuinely had nothing for it,
  * not a bug.
  */
+/**
+ * Sections as ordinary chunks, so any chunk-based template (Voyage, ...) can
+ * show a case study. The chunk id is `case-study-<key>`, the same name the
+ * section audio is stored under, so published audio URLs resolve unchanged.
+ */
+export function caseStudySectionsAsChunks(
+  sections: CaseStudySection[],
+  sectionAudio: Record<string, string> | undefined
+): Chunk[] {
+  return sections.map((section, index) => ({
+    id: `case-study-${section.key}`,
+    order: index + 1,
+    title: section.title,
+    narrativeText: section.body,
+    emotion: section.emotion,
+    ...(sectionAudio?.[section.key] ? { audioUrl: sectionAudio[section.key] } : {}),
+  }));
+}
+
 export function flattenCaseStudySections(slots: Record<string, unknown> | null): CaseStudySection[] {
   if (!slots) return [];
   const sections: CaseStudySection[] = [];
