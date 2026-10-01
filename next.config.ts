@@ -10,7 +10,19 @@ const nextConfig: NextConfig = {
   // WebSocket with `ws`, whose optional native helpers (bufferutil,
   // utf-8-validate) are resolved at runtime and break when bundled, so it is
   // loaded natively too.
-  serverExternalPackages: ["pdf-parse", "pdfjs-dist", "msedge-tts"],
+  //
+  // On Vercel (Linux) pdfjs-dist loads @napi-rs/canvas, whose platform binary
+  // is a dynamic require the file tracer misses; without it the whole route
+  // fails to load (empty 500). It is external too, and its files are traced in
+  // explicitly for the routes that read documents.
+  serverExternalPackages: ["pdf-parse", "pdfjs-dist", "@napi-rs/canvas", "msedge-tts"],
+  outputFileTracingIncludes: {
+    "/api/parse-and-generate": [
+      "./node_modules/@napi-rs/**/*",
+      "./node_modules/pdfjs-dist/legacy/build/**/*",
+      "./node_modules/pdfjs-dist/build/**/*",
+    ],
+  },
 };
 
 export default nextConfig;
