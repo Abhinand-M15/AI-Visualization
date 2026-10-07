@@ -40,6 +40,11 @@ export const TEMPLATES: TemplateInfo[] = [
     name: "Voyage",
     description: "Pick a chapter from a wheel of planets, then scroll through it: layered parallax skies, a giant title, your avatar and two glass cards. Scroll past the end to fly to the next chapter.",
   },
+  {
+    id: "showcase",
+    name: "Showcase",
+    description: "A scroll-driven 3D portfolio: a hero of floating crosses, a morphing story card and a grid of chapter tiles that open into their own pages. Light, crisp, smooth-scrolled.",
+  },
 ];
 
 export function getTemplateById(id: string): TemplateInfo | undefined {

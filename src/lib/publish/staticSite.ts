@@ -10,6 +10,7 @@ import {
   type NarrationDockThemeId,
 } from "@/lib/narrationDock";
 import { renderVoyage, type VoyageSiteOptions } from "./voyageSite";
+import { renderShowcase } from "./showcaseSite";
 
 const GSAP_CDN = "https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.5/gsap.min.js";
 const SCROLLTRIGGER_CDN = "https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.5/ScrollTrigger.min.js";
@@ -2130,6 +2131,12 @@ export function renderStaticSite(
       const chunks = caseStudySectionsAsChunks(sections, project.caseStudyBinding.sectionAudio);
       return renderVoyage({ ...project, chunks }, avatars, supabaseUrl, options.voyage);
     }
+    // Showcase too.
+    if (project.selectedTemplateId === "showcase") {
+      const sections = flattenCaseStudySections(project.caseStudyBinding.slots);
+      const chunks = caseStudySectionsAsChunks(sections, project.caseStudyBinding.sectionAudio);
+      return renderShowcase({ ...project, chunks }, avatars, supabaseUrl);
+    }
     return renderCaseStudy(project, avatars, supabaseUrl);
   }
 
@@ -2146,6 +2153,8 @@ export function renderStaticSite(
       return renderAirlock(project, avatars, supabaseUrl);
     case "voyage":
       return renderVoyage(project, avatars, supabaseUrl, options.voyage);
+    case "showcase":
+      return renderShowcase(project, avatars, supabaseUrl);
     case "editorial":
     default:
       return renderEditorial(project, avatars, supabaseUrl);

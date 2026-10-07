@@ -57,13 +57,14 @@ export default function PreviewPage({ params }: { params: Promise<{ id: string }
     </div>
   );
 
-  // Voyage is chunk-based, so a case study shows its sections as Voyage chapters.
-  if (isCaseStudy && project.selectedTemplateId === "voyage" && caseStudySections.length > 0 && avatars.length > 0) {
-    const VoyageComponent = TEMPLATE_COMPONENTS.voyage;
+  // Voyage and Showcase are chunk-based, so a case study shows its sections as their chapters.
+  const chunkBasedCaseStudy = project.selectedTemplateId === "voyage" || project.selectedTemplateId === "showcase";
+  if (isCaseStudy && chunkBasedCaseStudy && caseStudySections.length > 0 && avatars.length > 0) {
+    const ChunkTemplate = TEMPLATE_COMPONENTS[project.selectedTemplateId as string];
     return (
       <div>
         {backLink}
-        <VoyageComponent
+        <ChunkTemplate
           title={project.title}
           chunks={caseStudySectionsAsChunks(caseStudySections, project.caseStudyBinding?.sectionAudio)}
           avatars={avatars}

@@ -13,6 +13,7 @@ import { contentFingerprint } from "@/lib/contentVersion";
 import type { PublicationRecord } from "@/lib/types";
 import { AVATARS, avatarVideoFallbackUrl } from "@/lib/avatars";
 import { VOYAGE_ASSET_ROOT, voyageAssetPaths, type VoyageMood } from "@/lib/voyage";
+import { showcaseAssetPaths } from "@/lib/showcase";
 import { LUNAR_MOON_TEXTURE_PUBLIC_PATH, renderStaticSite } from "@/lib/publish/staticSite";
 import { deployToVercelDetailed, getPublishBaseDomain, type DeployFile } from "@/lib/publish/vercel";
 import { publishLocally } from "@/lib/publish/local";
@@ -195,7 +196,9 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
         ? [LUNAR_MOON_TEXTURE_PUBLIC_PATH]
         : isVoyage
           ? [...voyageAssetPaths(), ...Object.values(voyageMusic)]
-          : [];
+          : project.selectedTemplateId === "showcase"
+            ? showcaseAssetPaths()
+            : [];
     const avatarDeployFiles: DeployFile[] = await Promise.all(
       [...avatarImagePaths, ...avatarModelPaths, ...avatarVideoPaths, ...themeAssetPaths].map(async (assetUrl) => {
         const relativePath = assetUrl.replace(/^\//, "");

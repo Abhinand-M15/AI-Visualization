@@ -6,6 +6,7 @@ import SpaceTemplate from "./SpaceTemplate";
 import LunarTemplate from "./LunarTemplate";
 import AirlockTemplate from "./AirlockTemplate";
 import VoyageTemplate from "./VoyageTemplate";
+import ShowcaseTemplate from "./ShowcaseTemplate";
 import type { TemplateProps } from "./types";
 
 export const TEMPLATE_COMPONENTS: Record<string, ComponentType<TemplateProps>> = {
@@ -16,4 +17,5 @@ export const TEMPLATE_COMPONENTS: Record<string, ComponentType<TemplateProps>> =
   lunar: LunarTemplate,
   airlock: AirlockTemplate,
   voyage: VoyageTemplate,
+  showcase: ShowcaseTemplate,
 };
