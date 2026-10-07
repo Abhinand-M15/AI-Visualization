@@ -6,6 +6,7 @@ import { getSupabase } from "@/lib/db";
 import { requireUser, unauthorizedResponse, type AppUser } from "@/lib/auth/session";
 import { getGeminiKeyFor, missingApiKeyResponse } from "@/lib/userKeys";
 import { logActivity } from "@/lib/activity";
+import { getDomain, type Domain } from "@/lib/domains";
 import { DOCUMENTS_BUCKET, MAX_UPLOAD_BYTES, UPLOAD_EXTENSIONS, UPLOAD_MIME_TYPES, uploadExtensionOf } from "../uploads/shared";
 
 // Parsing a large document plus a long Gemini generation can run for minutes;
@@ -18,6 +19,8 @@ export const maxDuration = 300;
  *    whenever /api/uploads says { direct: false }), or
  *  - JSON { storagePath, fileName, documentType, targetChunkCount? } after the
  *    browser uploaded the file straight to the 'documents' bucket (accounts on).
+ * Both accept the optional fields domainId and logoPath (never required; an
+ * unknown domain or an invalid logo path is silently ignored).
  */
 interface ParsedRequest {
   fileName: string;
@@ -26,6 +29,26 @@ interface ParsedRequest {
   targetChunkCountRaw: unknown;
   clientApiKey?: string;
   documentId?: string;
+  domainIdRaw?: unknown;
+  logoPathRaw?: unknown;
+}
+
+/** The domain for an optional id, or null (also when the domains tables don't exist yet). Never throws. */
+async function resolveDomain(raw: unknown): Promise<Domain | null> {
+  if (typeof raw !== "string" || !raw.trim()) return null;
+  try {
+    return await getDomain(raw.trim());
+  } catch {
+    return null;
+  }
+}
+
+/** A logo path inside the caller's own folder of the company-logos bucket, else undefined. */
+function cleanLogoPath(raw: unknown, user: AppUser | null): string | undefined {
+  if (typeof raw !== "string") return undefined;
+  const path = raw.trim();
+  if (!path || path.length > 300 || path.includes("..") || path.startsWith("/")) return undefined;
+  return path.startsWith(`${user ? user.id : "anon"}/`) ? path : undefined;
 }
 
 class BadRequest extends Error {
@@ -48,6 +71,8 @@ async function readMultipart(request: Request): Promise<ParsedRequest> {
     documentType: formData.get("documentType"),
     targetChunkCountRaw: formData.get("targetChunkCount"),
     clientApiKey: typeof apiKey === "string" && apiKey ? apiKey : undefined,
+    domainIdRaw: formData.get("domainId"),
+    logoPathRaw: formData.get("logoPath"),
   };
 }
 
@@ -93,6 +118,8 @@ async function readFromStorage(request: Request, user: AppUser | null): Promise<
     documentType: body?.documentType,
     targetChunkCountRaw: body?.targetChunkCount,
     documentId,
+    domainIdRaw: body?.domainId,
+    logoPathRaw: body?.logoPath,
   };
 }
 
@@ -131,19 +158,28 @@ export async function POST(request: Request) {
       );
     }
 
-    const storyline = await generateStory(documentText, documentType as DocumentType, apiKey, targetChunkCount);
+    const domain = await resolveDomain(parsed.domainIdRaw);
+    const logoPath = cleanLogoPath(parsed.logoPathRaw, user);
+
+    const storyline = await generateStory(documentText, documentType as DocumentType, apiKey, targetChunkCount, {
+      domain,
+    });
 
     await logActivity(user, null, "chunks.generated", {
       fileName: parsed.fileName,
       documentType,
       chunkCount: storyline.chunks.length,
       documentId: parsed.documentId,
+      ...(domain ? { domainId: domain.id } : {}),
     });
 
     return NextResponse.json({
       storyline,
       sourceFileName: parsed.fileName,
       ...(parsed.documentId ? { documentId: parsed.documentId } : {}),
+      // Validated echo of the optional domain/logo; the client sends them with the project save.
+      ...(domain ? { domainId: domain.id } : {}),
+      ...(logoPath ? { logoPath } : {}),
     });
   } catch (error) {
     const handled = unauthorizedResponse(error) ?? missingApiKeyResponse(error);

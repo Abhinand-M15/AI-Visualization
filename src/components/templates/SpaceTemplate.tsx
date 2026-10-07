@@ -6,14 +6,22 @@ import { ScrollTrigger } from "gsap/ScrollTrigger";
 import { ASMRBackground } from "@/components/ui/asmr-background";
 import { avatarForIndex, type TemplateProps } from "./types";
 import { AvatarDisplay } from "./AvatarDisplay";
+import { ChapterLayout, SceneImg, type ChapterMediaItem } from "./ChapterLayout";
+import { CHAPTER_THEMES, chapterLists } from "@/lib/chapterLayout";
+import { StoryLogo } from "./StoryLogo";
 import { NarrationMasterControl } from "@/components/ui/NarrationMasterControl";
 import { NARRATION_DOCK_THEMES } from "@/lib/narrationDock";
 import { isNarrationPaused } from "@/lib/narrationControl";
 import { useNarrationAutoScroll } from "@/lib/useNarrationAutoScroll";
 
-if (typeof window !== "undefined") gsap.registerPlugin(ScrollTrigger);
+if (typeof window !== "undefined") {
+  gsap.registerPlugin(ScrollTrigger);
+  ScrollTrigger.config({ ignoreMobileResize: true });
+}
 
-export default function SpaceTemplate({ title, chunks, avatars }: TemplateProps) {
+const CHAPTER_THEME = CHAPTER_THEMES.space;
+
+export default function SpaceTemplate({ title, chunks, avatars, logoUrl }: TemplateProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   useNarrationAutoScroll(containerRef, ".space-section");
 
@@ -51,15 +59,23 @@ export default function SpaceTemplate({ title, chunks, avatars }: TemplateProps)
           return acc;
         }, []);
 
+        // Only the words between the previous and the new position are
+        // touched; the first event after a (re)start repaints them all.
+        let shown = -2;
+        function setSpoken(word: HTMLElement, spoken: boolean) {
+          word.classList.toggle("text-white", spoken);
+          word.classList.toggle("text-white/25", !spoken);
+        }
         function onTimeUpdate() {
           if (!audio.duration) return;
           const targetWeight = (audio.currentTime / audio.duration) * totalWeight;
           let activeIndex = cumulativeWeights.findIndex((w) => w >= targetWeight);
           if (activeIndex === -1) activeIndex = words.length - 1;
-          words.forEach((word, i) => {
-            word.classList.toggle("text-white", i <= activeIndex);
-            word.classList.toggle("text-white/25", i > activeIndex);
-          });
+          if (activeIndex === shown) return;
+          if (shown === -2) words.forEach((word, i) => setSpoken(word, i <= activeIndex));
+          else if (activeIndex > shown) for (let i = shown + 1; i <= activeIndex; i++) setSpoken(words[i], true);
+          else for (let i = activeIndex + 1; i <= shown; i++) setSpoken(words[i], false);
+          shown = activeIndex;
         }
         audio.addEventListener("timeupdate", onTimeUpdate);
         currentHandler = onTimeUpdate;
@@ -95,18 +111,6 @@ export default function SpaceTemplate({ title, chunks, avatars }: TemplateProps)
           onLeave: () => audio?.pause(),
           onLeaveBack: () => audio?.pause(),
         });
-
-        gsap.fromTo(
-          section.querySelector(".space-copy"),
-          { opacity: 0, y: 24 },
-          {
-            opacity: 1,
-            y: 0,
-            duration: 0.6,
-            ease: "power2.out",
-            scrollTrigger: { trigger: section, start: "top 75%" },
-          }
-        );
       });
     }, containerRef);
     return () => ctx.revert();
@@ -116,6 +120,7 @@ export default function SpaceTemplate({ title, chunks, avatars }: TemplateProps)
     <div ref={containerRef} className="relative text-white">
       <ASMRBackground />
       <NarrationMasterControl theme={NARRATION_DOCK_THEMES.space} />
+      <StoryLogo logoUrl={logoUrl} />
 
       <header className="relative px-10 pb-16 pt-24">
         <span className="text-xs font-light uppercase tracking-[0.4em] text-white/30">Space</span>
@@ -125,30 +130,29 @@ export default function SpaceTemplate({ title, chunks, avatars }: TemplateProps)
       {chunks.map((chunk, index) => {
         const avatar = avatarForIndex(index, avatars);
         const words = chunk.narrativeText.split(/\s+/).filter(Boolean);
-        const isReversed = index % 2 === 1;
+        const media: ChapterMediaItem[] = [];
+        if (chunk.imageUrl) media.push({ kind: "scene", node: <SceneImg src={chunk.imageUrl} /> });
+        if (avatar) {
+          media.push({
+            kind: "avatar",
+            node: <AvatarDisplay avatar={avatar} emotion={chunk.emotion} className="h-full w-full object-contain" />,
+          });
+        }
 
         return (
           <section
             key={chunk.id}
-            className={`space-section relative flex min-h-screen flex-col items-center gap-10 border-t border-white/5 px-8 py-20 md:gap-16 md:px-16 ${
-              isReversed ? "md:flex-row-reverse" : "md:flex-row"
-            }`}
+            className="space-section relative border-t border-white/5 px-6 py-16 md:px-12 md:py-24"
           >
-            <div className="flex w-full flex-shrink-0 justify-center md:w-[36%]">
-              {avatar && (
-                <AvatarDisplay
-                  avatar={avatar}
-                  emotion={chunk.emotion}
-                  className="h-[340px] w-[340px] object-contain drop-shadow-[0_0_60px_rgba(180,220,255,0.15)] md:h-[520px] md:w-[520px]"
-                />
-              )}
-            </div>
-
-            <div className="space-copy flex w-full flex-col gap-6 rounded-2xl border border-white/15 bg-black/40 p-8 shadow-[0_8px_32px_rgba(0,0,0,0.35)] md:w-[64%]">
-              <span className="text-xs font-medium uppercase tracking-wide text-white/40">
-                {String(index + 1).padStart(2, "0")} / {String(chunks.length).padStart(2, "0")}
-              </span>
-              <h2 className="text-base font-medium md:text-lg">{chunk.title}</h2>
+            <ChapterLayout
+              theme={CHAPTER_THEME}
+              index={index}
+              total={chunks.length}
+              eyebrow={`${String(index + 1).padStart(2, "0")} / ${String(chunks.length).padStart(2, "0")}`}
+              title={chunk.title}
+              media={media}
+              lists={chapterLists(chunks.map((c) => ({ title: c.title, text: c.narrativeText })), index)}
+            >
               <p
                 className="font-medium leading-normal tracking-tight"
                 style={{ fontSize: "clamp(0.9375rem, 1.25vw, 1.125rem)" }}
@@ -159,10 +163,8 @@ export default function SpaceTemplate({ title, chunks, avatars }: TemplateProps)
                   </span>
                 ))}
               </p>
-              {chunk.audioUrl && (
-                <audio src={chunk.audioUrl} />
-              )}
-            </div>
+              {chunk.audioUrl && <audio src={chunk.audioUrl} />}
+            </ChapterLayout>
           </section>
         );
       })}

@@ -7,6 +7,9 @@ import type { Avatar } from "@/lib/avatars";
 import type { CaseStudySection } from "@/lib/caseStudySections";
 import { avatarForIndex } from "./types";
 import { AvatarDisplay } from "./AvatarDisplay";
+import { StoryLogo } from "./StoryLogo";
+import { ChapterLayout, type ChapterMediaItem } from "./ChapterLayout";
+import { CHAPTER_THEMES, chapterLists } from "@/lib/chapterLayout";
 import { ASMRBackground } from "@/components/ui/asmr-background";
 import { lunarHeroDescription } from "@/lib/lunarHero";
 import { LunarHero } from "./LunarHero";
@@ -16,7 +19,10 @@ import { isNarrationPaused } from "@/lib/narrationControl";
 import { useNarrationAutoScroll } from "@/lib/useNarrationAutoScroll";
 import { NARRATION_DOCK_THEMES } from "@/lib/narrationDock";
 
-if (typeof window !== "undefined") gsap.registerPlugin(ScrollTrigger);
+if (typeof window !== "undefined") {
+  gsap.registerPlugin(ScrollTrigger);
+  ScrollTrigger.config({ ignoreMobileResize: true });
+}
 
 export type CaseStudyTheme = "light" | "space" | "lunar" | "airlock";
 
@@ -31,6 +37,8 @@ export interface CaseStudyTemplateProps {
    *  "face"; see the mode selection below for why. */
   sectionVideo?: Record<string, string>;
   avatars: Avatar[];
+  /** Company logo (public URL), shown with the shared StoryLogo element. */
+  logoUrl?: string;
   /** Renders the Space/Lunar/Airlock template's backdrop or hero + dark glass-panel copy instead of the plain white layout. */
   theme?: CaseStudyTheme;
 }
@@ -60,10 +68,16 @@ const THEME_CONFIG: Record<CaseStudyTheme, { label: string | null; accent: strin
   },
 };
 
+const CASE_STUDY_CHAPTER_THEMES = {
+  light: CHAPTER_THEMES.light,
+  space: CHAPTER_THEMES.space,
+  lunar: CHAPTER_THEMES.lunar,
+  airlock: CHAPTER_THEMES.airlock,
+};
+
 /**
- * The case-study experience — pixel-for-pixel the same pinned-avatar,
- * big-text, word-highlight-as-spoken pattern as EditorialTemplate, just
- * walking the fixed Company → Domain → Customer → Problem → Solution →
+ * The case-study experience — the pinned-avatar, big-text,
+ * word-highlight-as-spoken pattern, walking the fixed Company → Domain → Customer → Problem → Solution →
  * Impact sections produced by the layout-binding agent (see
  * caseStudySections.ts) instead of raw chunks. Case-study projects always
  * use this layout regardless of selectedTemplateId (see renderStaticSite) —
@@ -76,12 +90,13 @@ export default function CaseStudyTemplate({
   sectionAudio,
   sectionVideo,
   avatars,
+  logoUrl,
   theme = "light",
 }: CaseStudyTemplateProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   useNarrationAutoScroll(containerRef, ".case-study-section");
   const isDark = theme !== "light";
-  const { label, accent, border, glow } = THEME_CONFIG[theme];
+  const { label, accent, border } = THEME_CONFIG[theme];
 
   useEffect(() => {
     const ctx = gsap.context(() => {
@@ -119,15 +134,23 @@ export default function CaseStudyTemplate({
           return acc;
         }, []);
 
+        // Only the words between the previous and the new position are
+        // touched; the first event after a (re)start repaints them all.
+        let shown = -2;
+        function setSpoken(word: HTMLElement, spoken: boolean) {
+          word.classList.toggle(spokenClass, spoken);
+          word.classList.toggle(unspokenClass, !spoken);
+        }
         function onTimeUpdate() {
           if (!audio.duration) return;
           const targetWeight = (audio.currentTime / audio.duration) * totalWeight;
           let activeIndex = cumulativeWeights.findIndex((w) => w >= targetWeight);
           if (activeIndex === -1) activeIndex = words.length - 1;
-          words.forEach((word, i) => {
-            word.classList.toggle(spokenClass, i <= activeIndex);
-            word.classList.toggle(unspokenClass, i > activeIndex);
-          });
+          if (activeIndex === shown) return;
+          if (shown === -2) words.forEach((word, i) => setSpoken(word, i <= activeIndex));
+          else if (activeIndex > shown) for (let i = shown + 1; i <= activeIndex; i++) setSpoken(words[i], true);
+          else for (let i = activeIndex + 1; i <= shown; i++) setSpoken(words[i], false);
+          shown = activeIndex;
         }
         audio.addEventListener("timeupdate", onTimeUpdate);
         currentHandler = onTimeUpdate;
@@ -183,18 +206,6 @@ export default function CaseStudyTemplate({
             video?.pause();
           },
         });
-
-        gsap.fromTo(
-          section.querySelector(".case-study-copy"),
-          { opacity: 0, y: 24 },
-          {
-            opacity: 1,
-            y: 0,
-            duration: 0.6,
-            ease: "power2.out",
-            scrollTrigger: { trigger: section, start: "top 75%" },
-          }
-        );
       });
     }, containerRef);
     return () => ctx.revert();
@@ -206,6 +217,7 @@ export default function CaseStudyTemplate({
       className={theme === "lunar" ? "relative bg-black text-white" : isDark ? "relative text-white" : "bg-white text-neutral-900"}
     >
       <NarrationMasterControl theme={NARRATION_DOCK_THEMES[theme]} />
+      <StoryLogo logoUrl={logoUrl} />
       {theme === "space" && <ASMRBackground />}
       {theme === "airlock" ? (
         <AirlockHero title={title} />
@@ -232,40 +244,38 @@ export default function CaseStudyTemplate({
         // up. Every other theme keeps the default (3D model, if any).
         const wav2lipVideoUrl = theme === "lunar" ? sectionVideo?.[section.key] : undefined;
         const avatarMode = wav2lipVideoUrl ? "video" : theme === "lunar" ? "reactive" : "auto";
-        const words = section.body.split(/\s+/).filter(Boolean);
         const audioUrl = sectionAudio[section.key];
-        const isReversed = index % 2 === 1;
+        const words = section.body.split(/\s+/).filter(Boolean);
+        const media: ChapterMediaItem[] = [];
+        if (avatar) {
+          media.push({
+            kind: "avatar",
+            node: (
+              <AvatarDisplay
+                avatar={avatar}
+                emotion={section.emotion}
+                mode={avatarMode}
+                videoUrl={wav2lipVideoUrl}
+                className="h-full w-full object-contain"
+              />
+            ),
+          });
+        }
 
         return (
           <section
             key={section.key}
-            className={`case-study-section relative flex min-h-screen flex-col items-center gap-10 px-8 py-20 md:gap-16 md:px-16 border-t ${border} ${
-              isReversed ? "md:flex-row-reverse" : "md:flex-row"
-            }`}
+            className={`case-study-section relative border-t px-6 py-16 md:px-12 md:py-24 ${border}`}
           >
-            <div className="flex w-full flex-shrink-0 justify-center md:w-[36%]">
-              {avatar && (
-                <AvatarDisplay
-                  avatar={avatar}
-                  emotion={section.emotion}
-                  mode={avatarMode}
-                  videoUrl={wav2lipVideoUrl}
-                  className={`h-[340px] w-[340px] object-contain md:h-[520px] md:w-[520px] ${glow}`}
-                />
-              )}
-            </div>
-
-            <div
-              className={`case-study-copy flex w-full flex-col gap-6 md:w-[64%] ${
-                isDark
-                  ? `rounded-2xl border ${border} bg-black/40 p-8 shadow-[0_8px_32px_rgba(0,0,0,0.35)]`
-                  : ""
-              }`}
+            <ChapterLayout
+              theme={CASE_STUDY_CHAPTER_THEMES[theme]}
+              index={index}
+              total={sections.length}
+              eyebrow={section.sectionLabel}
+              title={section.title}
+              media={media}
+              lists={chapterLists(sections.map((s) => ({ title: s.title, text: s.body })), index)}
             >
-              <span className={`text-xs font-medium uppercase tracking-wide ${accent}`}>
-                {section.sectionLabel}
-              </span>
-              <h2 className="text-base font-medium md:text-lg">{section.title}</h2>
               <p
                 className="font-medium leading-normal tracking-tight"
                 style={{ fontSize: "clamp(0.9375rem, 1.25vw, 1.125rem)" }}
@@ -279,10 +289,8 @@ export default function CaseStudyTemplate({
                   </span>
                 ))}
               </p>
-              {audioUrl && (
-                <audio src={audioUrl} />
-              )}
-            </div>
+              {audioUrl && <audio src={audioUrl} />}
+            </ChapterLayout>
           </section>
         );
       })}

@@ -1,6 +1,7 @@
 import { GoogleGenAI, Type, type Schema } from "@google/genai";
 import type { CaseStudyPhase, Chunk, DocumentType, EmotionKey, EvidenceGrade, Storyline } from "@/lib/types";
 import { getSystemPrompt } from "@/lib/agent/systemPrompts";
+import { fillPrompt, getPrompt, type Domain } from "@/lib/domains";
 
 const MODEL_CASCADE = ["gemini-flash-latest", "gemini-flash-lite-latest"];
 const MAX_RETRIES_PER_MODEL = 2;
@@ -407,17 +408,44 @@ function targetChunkCountInstruction(targetChunkCount: number, isCaseStudy: bool
   return `\n\nTarget chunk count: aim for close to ${targetChunkCount} chunks total across all five phases. domain and customer still get at least one chunk each. It's fine (expected, even) to produce more problem/solution/impact chunks than this if the document supports it — closely related scenarios will be merged together afterward, so favor covering every distinct scenario over trying to hit the number exactly yourself. Don't invent content just to pad toward the count.`;
 }
 
+/**
+ * The domain wording guidance (prompt_templates 'story_domain_guidance' filled
+ * with the domain), or "" when there is no domain, no prompt row, or anything
+ * fails, so the story prompt then stays exactly as it was.
+ */
+export async function domainGuidanceText(domain?: Pick<Domain, "name" | "storyGuidance"> | null): Promise<string> {
+  if (!domain) return "";
+  try {
+    const template = await getPrompt("story_domain_guidance");
+    if (!template || !template.trim()) return "";
+    const filled = fillPrompt(template, {
+      domain_name: domain.name,
+      story_guidance: domain.storyGuidance,
+    }).trim();
+    return filled ? `\n\n${filled}` : "";
+  } catch {
+    return "";
+  }
+}
+
+export interface GenerateStoryOptions {
+  /** Industry the story is for; its wording guidance is appended to the system prompt. */
+  domain?: Domain | null;
+}
+
 export async function generateStory(
   documentText: string,
   documentType: DocumentType,
   apiKey?: string,
-  targetChunkCount?: number
+  targetChunkCount?: number,
+  options?: GenerateStoryOptions
 ): Promise<Storyline> {
   const isCaseStudy = documentType === "case-study";
-  const systemPrompt = await getSystemPrompt(
+  const baseSystemPrompt = await getSystemPrompt(
     isCaseStudy ? "story-generation:case-study" : "story-generation",
     isCaseStudy ? FALLBACK_CASE_STUDY_GENERATE_SYSTEM_PROMPT : FALLBACK_GENERATE_SYSTEM_PROMPT
   );
+  const systemPrompt = baseSystemPrompt + (await domainGuidanceText(options?.domain));
   const userContent = `Document type: ${documentType}\n\nDocument text:\n${documentText}${
     targetChunkCount ? targetChunkCountInstruction(targetChunkCount, isCaseStudy) : ""
   }`;

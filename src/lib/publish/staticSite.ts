@@ -9,6 +9,17 @@ import {
   narrationDockMarkup,
   type NarrationDockThemeId,
 } from "@/lib/narrationDock";
+import { CHAPTER_IMAGE_CSS, chapterImageHtml, injectStoryLogo } from "@/components/templates/storyMedia";
+import {
+  CHAPTER_LAYOUT_BOOT,
+  CHAPTER_LAYOUT_CSS,
+  CHAPTER_LAYOUT_JS,
+  CHAPTER_THEMES,
+  chapterLayoutHtml,
+  chapterLists,
+  type ChapterTheme,
+} from "@/lib/chapterLayout";
+import { TEMPLATE_UNAVAILABLE_MESSAGE, isTemplateAvailable } from "@/lib/templates";
 import { renderVoyage, type VoyageSiteOptions } from "./voyageSite";
 import { renderShowcase } from "./showcaseSite";
 
@@ -29,18 +40,6 @@ function needsAvatarModel(avatars: Avatar[]): boolean {
   // An avatar's video takes precedence over its model (see avatarBoxHtml).
   return avatars.some((avatar) => Boolean(avatar.modelUrl) && !(avatar.videoUrls && avatar.videoUrls.length > 0));
 }
-
-/** For templates without per-section scroll activation (Clarity, Cinematic):
- *  play each avatar video only while it's on screen, so they don't all
- *  decode and loop at once. */
-const AVATAR_VIDEO_IN_VIEW_JS = `
-document.querySelectorAll('.avatar-box video').forEach(function(video){
-  ScrollTrigger.create({
-    trigger: video.parentElement, start: 'top bottom', end: 'bottom top',
-    onToggle: function(self){ if (self.isActive) video.play().catch(function(){}); else video.pause(); }
-  });
-});
-`;
 
 /** Some templates (Lunar) already need THREE_CDN/ORBIT_CONTROLS_CDN for their
  *  own background scene — avoid loading the same CDN script twice. */
@@ -98,7 +97,7 @@ function avatarBoxHtml(avatarImage: string | null, avatar: Avatar | undefined): 
   if (avatar?.videoUrls && avatar.videoUrls.length > 0) return avatarVideoBoxHtml(avatar.videoUrls[0]);
   if (!avatarImage) return "";
   const modelAttr = avatar?.modelUrl ? ` data-model="${bundlePath(avatar.modelUrl)}"` : "";
-  return `<div class="avatar-box"${modelAttr}><img src="${avatarImage}" alt="" /></div>`;
+  return `<div class="avatar-box"${modelAttr}><img src="${avatarImage}" alt="" decoding="async" /></div>`;
 }
 
 /** Video-mode avatar slot — a template-level choice (only Lunar asks for
@@ -114,6 +113,47 @@ function avatarVideoBoxHtml(videoUrl: string | undefined): string {
     return `<div class="avatar-box"><video muted loop playsinline preload="metadata"><source src="${bundlePath(videoUrl)}" type="video/webm" /><source src="${bundlePath(fallback)}" type="video/mp4" /></video></div>`;
   }
   return `<div class="avatar-box"><video src="${bundlePath(videoUrl)}" muted loop playsinline preload="metadata"></video></div>`;
+}
+
+/**
+ * One chapter in the shared vertical layout (src/lib/chapterLayout.ts): the
+ * scene image (when the chapter has one) and the avatar stack as large rounded
+ * pictures, then the text panel. `textHtml` keeps each template's own narration
+ * markup (word spans), so the highlight and scroll narration work unchanged.
+ */
+function chapterBlock(opts: {
+  theme: ChapterTheme;
+  index: number;
+  total: number;
+  eyebrow: string;
+  title: string;
+  textHtml: string;
+  audioSrc: string | null;
+  sceneUrl?: string;
+  avatarMarkup: string;
+  lists: ReturnType<typeof chapterLists>;
+}): string {
+  const media: { kind: "scene" | "avatar"; html: string }[] = [];
+  if (opts.sceneUrl) media.push({ kind: "scene", html: chapterImageHtml(opts.sceneUrl) });
+  if (opts.avatarMarkup) media.push({ kind: "avatar", html: opts.avatarMarkup });
+  return chapterLayoutHtml({
+    theme: opts.theme,
+    index: opts.index,
+    total: opts.total,
+    eyebrow: opts.eyebrow,
+    title: opts.title,
+    textHtml: opts.textHtml,
+    audioHtml: opts.audioSrc ? `<audio src="${opts.audioSrc}"></audio>` : "",
+    media,
+    lists: opts.lists,
+  });
+}
+
+function chunkLists(chunks: Chunk[], index: number) {
+  return chapterLists(
+    chunks.map((c) => ({ title: c.title, text: c.narrativeText })),
+    index
+  );
 }
 
 function avatarVideoPath(index: number, avatar: Avatar | undefined): string | undefined {
@@ -148,7 +188,7 @@ const AVATAR_BOX_CSS = `
 .avatar-box img,.avatar-box canvas,.avatar-box video{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;}
 .avatar-box canvas{display:none;touch-action:pan-y;cursor:grab;}
 .avatar-box.dragging canvas{cursor:grabbing;}
-`;
+` + CHAPTER_IMAGE_CSS;
 
 /**
  * Vanilla-three.js port of components/ui/avatar-3d.tsx for the published
@@ -201,7 +241,10 @@ const AVATAR3D_INIT_JS = `
     var url = box.getAttribute('data-model');
     var img = box.querySelector('img');
     var canvas = null, renderer = null, scene = null, camera = null, controls = null, modelGroup = null;
-    var hovered = false, rafId = 0, resizeObs = null, mounted = false, cancelled = false;
+    var hovered = false, rafId = 0, resizeObs = null, mounted = false, cancelled = false, needsRender = true;
+    // Hover state is tracked once per box, not re-bound on every (re)mount.
+    box.addEventListener('pointerenter', function() { hovered = true; });
+    box.addEventListener('pointerleave', function() { hovered = false; });
 
     function frameCamera(object) {
       var box3 = new THREE.Box3().setFromObject(object);
@@ -229,6 +272,7 @@ const AVATAR3D_INIT_JS = `
       renderer.setSize(w, h, false);
       camera.aspect = w / h;
       camera.updateProjectionMatrix();
+      needsRender = true;
     }
 
     function mount() {
@@ -273,9 +317,7 @@ const AVATAR3D_INIT_JS = `
       // browsers — this guarantees the canvas is never stuck at a stale size.
       setTimeout(resize, 50);
 
-      box.addEventListener('pointerenter', function() { hovered = true; });
-      box.addEventListener('pointerleave', function() { hovered = false; });
-
+      needsRender = true;
       loadModel(url).then(function(sourceScene) {
         if (cancelled) return;
         var cloned = sourceScene.clone();
@@ -283,6 +325,7 @@ const AVATAR3D_INIT_JS = `
         frameCamera(cloned);
         img.style.display = 'none';
         canvas.style.display = 'block';
+        needsRender = true;
       }).catch(function() {
         unmount();
       });
@@ -293,9 +336,15 @@ const AVATAR3D_INIT_JS = `
         var delta = Math.min(0.1, now - clock);
         clock = now;
         var target = hovered ? 1.08 : 1;
-        modelGroup.scale.setScalar(modelGroup.scale.x + (target - modelGroup.scale.x) * Math.min(1, delta * 6));
-        controls.update();
-        renderer.render(scene, camera);
+        var prevScale = modelGroup.scale.x;
+        modelGroup.scale.setScalar(prevScale + (target - prevScale) * Math.min(1, delta * 6));
+        // Draw only when something changed (orbit/damping, hover scale, resize, model loaded):
+        // an idle avatar no longer re-renders 60 times a second.
+        var moved = controls.update();
+        if (moved || needsRender || Math.abs(modelGroup.scale.x - prevScale) > 0.0001) {
+          renderer.render(scene, camera);
+          needsRender = false;
+        }
         rafId = requestAnimationFrame(tick);
       }
       tick();
@@ -347,10 +396,12 @@ function documentWrap(title: string, css: string, body: string, js: string, extr
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>${escapeHtml(title)}</title>
-<style>${css}</style>
+${CHAPTER_LAYOUT_BOOT}
+<style>${css}${CHAPTER_LAYOUT_CSS}</style>
 </head>
 <body>
 ${body}
+<script>${CHAPTER_LAYOUT_JS}</script>
 ${extraScripts.map((src) => `<script src="${src}"></script>`).join("\n")}
 <script src="${GSAP_CDN}"></script>
 <script src="${SCROLLTRIGGER_CDN}"></script>
@@ -359,9 +410,57 @@ ${extraScripts.map((src) => `<script src="${src}"></script>`).join("\n")}
 </html>`;
 }
 
+/**
+ * Word highlight shared by the scrolling templates. Driven by the <audio>
+ * element's own "timeupdate" (a native media event, not requestAnimationFrame,
+ * which browsers throttle in background tabs). The TTS server returns no real
+ * per-word timestamps, so word position is estimated from elapsed time,
+ * weighted by each word's character count plus a fixed per-word floor
+ * ("a" and "extraordinarily" do not take the same time to say). Only the words
+ * between the previous and the new position are touched, not every word on
+ * every event; the first event after a (re)start repaints them all.
+ */
+const TRACK_HIGHLIGHT_JS = `
+var currentAudio = null;
+var currentHandler = null;
+
+function stopHighlightTracking() {
+  if (currentAudio && currentHandler) currentAudio.removeEventListener('timeupdate', currentHandler);
+  currentHandler = null;
+}
+
+function trackHighlight(audio, words) {
+  var weights = words.map(function(word) { return (word.textContent || '').trim().length + 3; });
+  var totalWeight = weights.reduce(function(sum, w) { return sum + w; }, 0);
+  var cumulativeWeights = [];
+  var running = 0;
+  weights.forEach(function(w) { running += w; cumulativeWeights.push(running); });
+  var shown = -2;
+
+  function onTimeUpdate() {
+    if (!audio.duration) return;
+    var targetWeight = (audio.currentTime / audio.duration) * totalWeight;
+    var activeIndex = cumulativeWeights.findIndex(function(w) { return w >= targetWeight; });
+    if (activeIndex === -1) activeIndex = words.length - 1;
+    if (activeIndex === shown) return;
+    var i;
+    if (shown === -2) {
+      for (i = 0; i < words.length; i++) words[i].classList.toggle('spoken', i <= activeIndex);
+    } else if (activeIndex > shown) {
+      for (i = shown + 1; i <= activeIndex; i++) words[i].classList.add('spoken');
+    } else {
+      for (i = activeIndex + 1; i <= shown; i++) words[i].classList.remove('spoken');
+    }
+    shown = activeIndex;
+  }
+  audio.addEventListener('timeupdate', onTimeUpdate);
+  currentHandler = onTimeUpdate;
+}
+`;
+
 // ---------------------------------------------------------------------------
 // Scroll-driven narration shared by every section-per-screen template
-// (Editorial, Space, Lunar, Airlock, case study).
+// (Space, Lunar, Airlock, case study).
 //
 // Browsers refuse audio.play() until the visitor has interacted with the
 // page (a tap/click/key — scrolling doesn't count), so scroll-triggered
@@ -403,9 +502,7 @@ ${narrationDockMarkup(NARRATION_DOCK_THEMES[dock])}`;
 
 // Expects currentAudio, stopHighlightTracking() and trackHighlight() to be
 // defined by the template's own script before it. Sections are `.section`
-// elements; a template whose sections have no word-by-word text (Clarity,
-// Cinematic) defines no-op highlight functions and `narrationSkipVideo` (its
-// avatar videos already play on their own in-view rule).
+// elements.
 const SCROLL_NARRATION_JS =
   NARRATION_DOCK_JS +
   `
@@ -441,7 +538,7 @@ function activateSection(section) {
     trackHighlight(audio, words);
     playNarration(audio);
   }
-  var video = window.narrationSkipVideo ? null : section.querySelector('video');
+  var video = section.querySelector('video');
   if (video) {
     video.currentTime = 0;
     video.play().catch(function(){});
@@ -451,7 +548,7 @@ function activateSection(section) {
 function deactivateSection(section) {
   if (activeSection === section) activeSection = null;
   var audio = section.querySelector('audio');
-  var video = window.narrationSkipVideo ? null : section.querySelector('video');
+  var video = section.querySelector('video');
   if (audio) audio.pause();
   if (video) video.pause();
 }
@@ -554,254 +651,6 @@ document.querySelectorAll('.section').forEach(function(section){
 });
 `;
 
-function renderEditorial(project: Project, avatars: Avatar[], supabaseUrl: string): string {
-  const css = `
-:root{color-scheme:light}
-body{margin:0;font-family:-apple-system,'Segoe UI',sans-serif;background:#fff;color:#171717;}
-.header{padding:96px 32px 64px;}
-.header h1{max-width:760px;font-size:1.5rem;font-weight:500;line-height:1.2;margin:0;}
-@media(min-width:768px){.header h1{font-size:1.75rem;}}
-.section{min-height:100vh;display:flex;flex-direction:column;align-items:center;gap:40px;border-top:1px solid #f0f0f0;padding:80px 32px;box-sizing:border-box;}
-@media(min-width:768px){.section{flex-direction:row;gap:64px;padding:80px 64px;}}
-.section.reversed{flex-direction:column;}
-@media(min-width:768px){.section.reversed{flex-direction:row-reverse;}}
-.avatar-wrap{width:100%;flex-shrink:0;display:flex;justify-content:center;}
-@media(min-width:768px){.avatar-wrap{width:36%;}}
-.avatar-wrap .avatar-box{width:280px;height:280px;}
-@media(min-width:768px){.avatar-wrap .avatar-box{width:420px;height:420px;}}
-.copy{opacity:0;transform:translateY(24px);width:100%;display:flex;flex-direction:column;gap:24px;}
-@media(min-width:768px){.copy{width:64%;}}
-.eyebrow{font-size:.75rem;text-transform:uppercase;letter-spacing:.05em;color:#a3a3a3;}
-.copy h2{font-size:1rem;font-weight:500;margin:0;}
-@media(min-width:768px){.copy h2{font-size:1.125rem;}}
-.big-text{font-weight:500;line-height:1.5;letter-spacing:-0.01em;font-size:clamp(0.9375rem, 1.25vw, 1.125rem);margin:0;}
-.word{color:#d4d4d4;transition:color .15s;}
-.word.spoken{color:#171717;}
-` +
-    narrationGateCss({ isDark: false, accent: "#fff", border: "rgba(255,255,255,.15)" }) +
-    AVATAR_BOX_CSS;
-
-  const sectionsHtml = project.chunks
-    .map((chunk, index) => {
-      const avatar = avatarForIndex(index, avatars);
-      const avatarImage = avatarImagePath(chunk, index, avatars);
-      const src = audioUrl(supabaseUrl, project.id, chunk);
-      const words = chunk.narrativeText.split(/\s+/).filter(Boolean);
-      const wordsHtml = words.map((w) => `<span class="word">${escapeHtml(w)} </span>`).join("");
-      return `
-<section class="section${index % 2 === 1 ? " reversed" : ""}">
-  <div class="avatar-wrap">${avatarBoxHtml(avatarImage, avatar)}</div>
-  <div class="copy">
-    <span class="eyebrow">${String(index + 1).padStart(2, "0")} / ${String(project.chunks.length).padStart(2, "0")}</span>
-    <h2>${escapeHtml(chunk.title)}</h2>
-    <p class="big-text">${wordsHtml}</p>
-    ${src ? `<audio src="${src}"></audio>` : ""}
-  </div>
-</section>`;
-    })
-    .join("\n");
-
-  const body = `
-<header class="header"><h1>${escapeHtml(project.title)}</h1></header>
-${sectionsHtml}
-${narrationGateMarkup(hasChunkNarration(project, supabaseUrl), "light")}
-`;
-
-  const js = `
-gsap.registerPlugin(ScrollTrigger);
-var currentAudio = null;
-var currentHandler = null;
-
-function stopHighlightTracking() {
-  if (currentAudio && currentHandler) currentAudio.removeEventListener('timeupdate', currentHandler);
-  currentHandler = null;
-}
-
-// Driven by the <audio> element's own "timeupdate" event rather than
-// requestAnimationFrame — rAF is tied to the page's paint loop, which
-// browsers throttle or pause outright once a tab isn't the actively
-// rendered one, silently freezing the highlight mid-playback even though
-// the audio itself keeps going. "timeupdate" is a native media event that
-// fires from the audio/video decode pipeline, independent of paint
-// throttling, so the highlight can't desync from playback.
-//
-// The TTS server doesn't return real per-word timestamps, so word position
-// is estimated from elapsed time — but weighted by each word's character
-// count (plus a fixed per-word floor) rather than splitting the audio into
-// equal-length slices. Equal slices visibly drift out of sync on real
-// narration ("a" and "extraordinarily" do not take the same time to say);
-// length-weighting tracks natural speech pacing far more closely.
-function trackHighlight(audio, words) {
-  var weights = words.map(function(word) { return (word.textContent || '').trim().length + 3; });
-  var totalWeight = weights.reduce(function(sum, w) { return sum + w; }, 0);
-  var cumulativeWeights = [];
-  var running = 0;
-  weights.forEach(function(w) { running += w; cumulativeWeights.push(running); });
-
-  function onTimeUpdate() {
-    if (!audio.duration) return;
-    var targetWeight = (audio.currentTime / audio.duration) * totalWeight;
-    var activeIndex = cumulativeWeights.findIndex(function(w) { return w >= targetWeight; });
-    if (activeIndex === -1) activeIndex = words.length - 1;
-    words.forEach(function(word, i) { word.classList.toggle('spoken', i <= activeIndex); });
-  }
-  audio.addEventListener('timeupdate', onTimeUpdate);
-  currentHandler = onTimeUpdate;
-}
-
-` + SCROLL_NARRATION_JS;
-
-  const needsModel = needsAvatarModel(avatars);
-  return documentWrap(
-    project.title,
-    css,
-    body,
-    js + (needsModel ? AVATAR3D_INIT_JS : ""),
-    needsModel ? AVATAR_MODEL_CDN_SCRIPTS : []
-  );
-}
-
-function renderClarity(project: Project, avatars: Avatar[], supabaseUrl: string): string {
-  const css = `
-body{margin:0;font-family:-apple-system,'Segoe UI',sans-serif;background:#fafafa;color:#171717;}
-.wrap{max-width:680px;margin:0 auto;padding:80px 24px 50vh;display:flex;flex-direction:column;gap:56px;}
-h1{font-size:1.5rem;font-weight:500;letter-spacing:-0.01em;margin:0;}
-.cards{display:flex;flex-direction:column;gap:20px;}
-.card{opacity:0;transform:translateY(16px);display:flex;gap:16px;border-radius:16px;border:1px solid #e5e5e5;background:#fff;padding:24px;box-shadow:0 1px 2px rgba(0,0,0,.04);box-sizing:border-box;}
-.avatar-badge{width:48px;height:48px;border-radius:9999px;background:#f5f5f5;display:flex;align-items:center;justify-content:center;flex-shrink:0;}
-.avatar-badge .avatar-box{width:40px;height:40px;}
-.card-body{display:flex;flex-direction:column;gap:8px;flex:1;}
-.chunk-label{font-size:.75rem;font-weight:500;color:#a3a3a3;}
-.card h2{font-size:1rem;font-weight:500;margin:0;}
-.card p{font-size:.875rem;line-height:1.7;color:#525252;margin:0;}
-` +
-    narrationGateCss({ isDark: false, accent: "#fff", border: "rgba(255,255,255,.15)" }) +
-    AVATAR_BOX_CSS;
-
-  const cardsHtml = project.chunks
-    .map((chunk, index) => {
-      const avatar = avatarForIndex(index, avatars);
-      const avatarImage = avatarImagePath(chunk, index, avatars);
-      const src = audioUrl(supabaseUrl, project.id, chunk);
-      return `
-<article class="card section">
-  ${avatarImage ? `<div class="avatar-badge">${avatarBoxHtml(avatarImage, avatar)}</div>` : ""}
-  <div class="card-body">
-    <span class="chunk-label">Chunk ${chunk.order}</span>
-    <h2>${escapeHtml(chunk.title)}</h2>
-    <p>${escapeHtml(chunk.narrativeText)}</p>
-    ${src ? `<audio src="${src}"></audio>` : ""}
-  </div>
-</article>`;
-    })
-    .join("\n");
-
-  const body = `
-<div class="wrap">
-  <h1>${escapeHtml(project.title)}</h1>
-  <div class="cards">${cardsHtml}</div>
-</div>
-${narrationGateMarkup(hasChunkNarration(project, supabaseUrl), "light")}
-`;
-
-  // Each card is a "section" for the shared scroll narration. The cards have no
-  // word-by-word text, so the highlight hooks are no-ops, and the avatar videos
-  // keep their own in-view rule.
-  const js = `
-gsap.registerPlugin(ScrollTrigger);
-var narrationSkipVideo = true;
-var currentAudio = null;
-function stopHighlightTracking() {}
-function trackHighlight() {}
-document.querySelectorAll('.card').forEach(function(card){
-  gsap.fromTo(card, {opacity:0, y:16}, {
-    opacity:1, y:0, duration:0.5, ease:'power2.out',
-    scrollTrigger:{trigger:card, start:'top 85%'}
-  });
-});
-` + SCROLL_NARRATION_JS + AVATAR_VIDEO_IN_VIEW_JS;
-
-  const needsModel = needsAvatarModel(avatars);
-  return documentWrap(
-    project.title,
-    css,
-    body,
-    js + (needsModel ? AVATAR3D_INIT_JS : ""),
-    needsModel ? AVATAR_MODEL_CDN_SCRIPTS : []
-  );
-}
-
-function renderCinematic(project: Project, avatars: Avatar[], supabaseUrl: string): string {
-  const palette = ["#0b0d12", "#151822", "#1a1024", "#101a17", "#1c1410"];
-  const css = `
-body{margin:0;font-family:-apple-system,'Segoe UI',sans-serif;color:#fff;}
-.hero{height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:0 24px;text-align:center;background:${palette[0]};box-sizing:border-box;}
-.hero h1{max-width:640px;font-size:1.5rem;font-weight:500;line-height:1.2;margin:0;}
-.hero p{margin-top:16px;font-size:.8rem;text-transform:uppercase;letter-spacing:.15em;color:rgba(255,255,255,.5);}
-.cine-section{min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:24px;padding:0 24px;text-align:center;box-sizing:border-box;}
-.cine-content{opacity:0;transform:scale(0.94);display:flex;flex-direction:column;align-items:center;gap:24px;}
-.cine-content .avatar-box{width:176px;height:176px;filter:drop-shadow(0 0 60px rgba(255,255,255,.15));}
-.cine-label{font-size:.75rem;text-transform:uppercase;letter-spacing:.15em;color:rgba(255,255,255,.4);}
-.cine-content h2{max-width:640px;font-size:1.125rem;font-weight:500;margin:0;}
-.cine-content p{max-width:560px;font-size:.9375rem;line-height:1.7;color:rgba(255,255,255,.7);margin:0;}
-` +
-    narrationGateCss({ isDark: true, accent: "#fff", border: "rgba(255,255,255,.15)" }) +
-    AVATAR_BOX_CSS;
-
-  const sectionsHtml = project.chunks
-    .map((chunk, index) => {
-      const avatar = avatarForIndex(index, avatars);
-      const avatarImage = avatarImagePath(chunk, index, avatars);
-      const bg = palette[(index + 1) % palette.length];
-      const src = audioUrl(supabaseUrl, project.id, chunk);
-      return `
-<section class="cine-section section" style="background:${bg}">
-  <div class="cine-content">
-    ${avatarBoxHtml(avatarImage, avatar)}
-    <span class="cine-label">Chunk ${chunk.order} of ${project.chunks.length}</span>
-    <h2>${escapeHtml(chunk.title)}</h2>
-    <p>${escapeHtml(chunk.narrativeText)}</p>
-    ${src ? `<audio src="${src}"></audio>` : ""}
-  </div>
-</section>`;
-    })
-    .join("\n");
-
-  const body = `
-<div class="hero"><h1>${escapeHtml(project.title)}</h1><p>Scroll to begin</p></div>
-${sectionsHtml}
-${narrationGateMarkup(hasChunkNarration(project, supabaseUrl), "cinematic")}
-`;
-
-  // Each screen is a "section" for the shared scroll narration (the per-section
-  // play buttons are gone — the narration dock is the one control). No
-  // word-by-word text, so the highlight hooks are no-ops; avatar videos keep
-  // their own in-view rule.
-  const js = `
-gsap.registerPlugin(ScrollTrigger);
-var narrationSkipVideo = true;
-var currentAudio = null;
-function stopHighlightTracking() {}
-function trackHighlight() {}
-document.querySelectorAll('.cine-section').forEach(function(section){
-  var content = section.querySelector('.cine-content');
-  gsap.fromTo(content, {opacity:0, scale:0.94}, {
-    opacity:1, scale:1, duration:0.7, ease:'power2.out',
-    scrollTrigger:{trigger:section, start:'top 60%', end:'bottom 40%', toggleActions:'play reverse play reverse'}
-  });
-});
-` + SCROLL_NARRATION_JS + AVATAR_VIDEO_IN_VIEW_JS;
-
-  const needsModel = needsAvatarModel(avatars);
-  return documentWrap(
-    project.title,
-    css,
-    body,
-    js + (needsModel ? AVATAR3D_INIT_JS : ""),
-    needsModel ? AVATAR_MODEL_CDN_SCRIPTS : []
-  );
-}
-
 /** Fixed full-page canvas + custom cursor dot — shared by every space-themed render (the standalone Space template and the case-study layout when it opts into the Space background). */
 const ASMR_CSS = `
 :root{color-scheme:dark}
@@ -836,6 +685,8 @@ const ASMR_INIT_JS = `
     this.rotation = Math.random() * Math.PI * 2;
     this.rotationSpeed = (Math.random() - 0.5) * 0.05;
     this.frictionGlow = 0;
+    this.styleAlpha = -1;
+    this.style = '';
   };
   Particle.prototype.update = function() {
     var dx = mouse.x - this.x, dy = mouse.y - this.y;
@@ -861,12 +712,16 @@ const ASMR_INIT_JS = `
     if (this.y > height + 20) this.y = -20;
   };
   Particle.prototype.draw = function() {
-    ctx.save();
-    ctx.translate(this.x, this.y);
-    ctx.rotate(this.rotation);
+    var cos = Math.cos(this.rotation), sin = Math.sin(this.rotation);
+    ctx.setTransform(cos, sin, -sin, cos, this.x, this.y);
     var finalAlpha = Math.min(this.alpha + this.frictionGlow, 0.9);
-    ctx.fillStyle = 'rgba(' + this.color + ', ' + finalAlpha + ')';
-    if (this.frictionGlow > 0.3) {
+    if (finalAlpha !== this.styleAlpha) {
+      this.styleAlpha = finalAlpha;
+      this.style = 'rgba(' + this.color + ', ' + finalAlpha + ')';
+    }
+    ctx.fillStyle = this.style;
+    var glowing = this.frictionGlow > 0.3;
+    if (glowing) {
       ctx.shadowBlur = 8 * this.frictionGlow;
       ctx.shadowColor = 'rgba(180, 220, 255, ' + this.frictionGlow + ')';
     }
@@ -877,7 +732,7 @@ const ASMR_INIT_JS = `
     ctx.lineTo(-this.size, 0);
     ctx.closePath();
     ctx.fill();
-    ctx.restore();
+    if (glowing) ctx.shadowBlur = 0;
   };
 
   function init() {
@@ -887,21 +742,43 @@ const ASMR_INIT_JS = `
     for (var i = 0; i < PARTICLE_COUNT; i++) particles.push(new Particle());
   }
 
+  var cursorX = -1000, cursorY = -1000, cursorDirty = false;
   function render() {
+    animationFrameId = requestAnimationFrame(render);
+    // The cursor dot is written once per frame, not once per mouse event.
+    if (cursorDirty) {
+      cursorDirty = false;
+      cursor.style.transform = 'translate(calc(' + cursorX + 'px - 50%), calc(' + cursorY + 'px - 50%))';
+    }
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.fillStyle = 'rgba(10, 10, 12, 0.18)';
     ctx.fillRect(0, 0, width, height);
-    particles.forEach(function(p) { p.update(); p.draw(); });
-    animationFrameId = requestAnimationFrame(render);
+    for (var i = 0; i < particles.length; i++) { particles[i].update(); particles[i].draw(); }
   }
 
-  window.addEventListener('resize', init);
+  // Resize is coalesced to one frame and keeps the particles (rescaled) rather
+  // than respawning them, so a phone's address bar collapsing does not make the
+  // field jump.
+  var resizeFrame = 0;
+  window.addEventListener('resize', function() {
+    if (resizeFrame) return;
+    resizeFrame = requestAnimationFrame(function() {
+      resizeFrame = 0;
+      var nextW = window.innerWidth, nextH = window.innerHeight;
+      if (nextW === width && nextH === height) return;
+      var sx = nextW / width, sy = nextH / height;
+      width = canvas.width = nextW;
+      height = canvas.height = nextH;
+      for (var i = 0; i < particles.length; i++) { particles[i].x *= sx; particles[i].y *= sy; }
+    });
+  });
   window.addEventListener('mousemove', function(e) {
     mouse.x = e.clientX; mouse.y = e.clientY;
-    cursor.style.transform = 'translate(calc(' + e.clientX + 'px - 50%), calc(' + e.clientY + 'px - 50%))';
-  });
+    cursorX = e.clientX; cursorY = e.clientY; cursorDirty = true;
+  }, { passive: true });
   window.addEventListener('touchmove', function(e) {
     if (e.touches[0]) { mouse.x = e.touches[0].clientX; mouse.y = e.touches[0].clientY; }
-  });
+  }, { passive: true });
 
   init();
   render();
@@ -1003,7 +880,8 @@ const LUNAR_INIT_JS = `
 
   var renderer = new THREE.WebGLRenderer({ canvas: canvas, antialias: true, alpha: true, powerPreference: 'high-performance' });
   // Full-window canvas: cap the pixel ratio so a 60fps frame stays cheap.
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
+  // (and a little lower again on small screens, where the GPU is weakest).
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, window.innerWidth < 768 ? 1.25 : 1.5));
   renderer.shadowMap.enabled = true;
   renderer.shadowMap.type = THREE.PCFSoftShadowMap;
   renderer.outputEncoding = THREE.sRGBEncoding;
@@ -1028,7 +906,12 @@ const LUNAR_INIT_JS = `
     renderer.setSize(window.innerWidth, window.innerHeight, false);
   }
   resize();
-  window.addEventListener('resize', resize);
+  // Coalesced to one call per frame (a phone's address bar fires resize while scrolling).
+  var resizeFrame = 0;
+  window.addEventListener('resize', function() {
+    if (resizeFrame) return;
+    resizeFrame = requestAnimationFrame(function() { resizeFrame = 0; resize(); });
+  });
 
   // Scroll-driven hand-off from card to page background. At scrollY 0 the
   // scene is framed and clipped exactly to the card's scene slot (identical
@@ -1040,13 +923,24 @@ const LUNAR_INIT_JS = `
   var lastClip = '';
   var backgroundProgress = 0;
   function near(a, b) { return Math.abs(a - b) < 2; }
+  var settledKey = '';
   function layout() {
     var vw = window.innerWidth, vh = window.innerHeight;
-    var r = slot.getBoundingClientRect();
-    var c = card.getBoundingClientRect();
     var p = Math.min(1, Math.max(0, window.scrollY / (vh * 0.85)));
     var e = p * p * (3 - 2 * p);
     backgroundProgress = e;
+    // Once the hand-off is complete the frame is the whole window and no longer
+    // depends on the slot or card, so skip the layout reads and the projection
+    // update until the window size changes.
+    if (e >= 1) {
+      var key = vw + 'x' + vh;
+      if (key === settledKey) return;
+      settledKey = key;
+    } else {
+      settledKey = '';
+    }
+    var r = slot.getBoundingClientRect();
+    var c = card.getBoundingClientRect();
     var x = r.left * (1 - e), y = r.top * (1 - e);
     var w = r.width + (vw - r.width) * e, h = r.height + (vh - r.height) * e;
     if (w < 1 || h < 1) return;
@@ -1118,13 +1012,21 @@ const LUNAR_INIT_JS = `
     return raycaster.intersectObject(moon, false).length > 0;
   }
   var overMoon = false;
+  // The hover test (a raycast) runs at most once per frame, from the latest pointer position.
+  var pendingMove = null;
   canvas.addEventListener('pointermove', function(e) {
-    var hit = hitsMoon(e);
+    pendingMove = { clientX: e.clientX, clientY: e.clientY };
+  }, { passive: true });
+  function processPointerMove() {
+    if (!pendingMove) return;
+    var move = pendingMove;
+    pendingMove = null;
+    var hit = hitsMoon(move);
     if (hit !== overMoon) {
       overMoon = hit;
       document.body.style.cursor = hit ? 'pointer' : 'auto';
     }
-  });
+  }
   canvas.addEventListener('pointerleave', function() {
     if (overMoon) { overMoon = false; document.body.style.cursor = 'auto'; }
   });
@@ -1292,7 +1194,7 @@ const LUNAR_INIT_JS = `
     pointerNdc.x = (e.clientX / window.innerWidth) * 2 - 1;
     pointerNdc.y = -(e.clientY / window.innerHeight) * 2 + 1;
     pointerNdc.active = true;
-  });
+  }, { passive: true });
   document.addEventListener('pointerleave', function() { pointerNdc.active = false; });
   var lastScrollY = window.scrollY;
 
@@ -1357,6 +1259,7 @@ const LUNAR_INIT_JS = `
     last = now;
 
     layout();
+    processPointerMove();
     // Once the moon leaves the card to become the page background, its ring
     // and asteroid belt form on their own (clicking the moon in the hero
     // still triggers it first, exactly as in the card).
@@ -1449,19 +1352,8 @@ function renderSpace(project: Project, avatars: Avatar[], supabaseUrl: string): 
 .header .kicker{font-size:.75rem;font-weight:300;text-transform:uppercase;letter-spacing:.4em;color:rgba(255,255,255,.3);}
 .header h1{margin:16px 0 0;max-width:760px;font-size:1.5rem;font-weight:500;line-height:1.2;}
 @media(min-width:768px){.header h1{font-size:1.75rem;}}
-.section{position:relative;min-height:100vh;display:flex;flex-direction:column;align-items:center;gap:40px;border-top:1px solid rgba(255,255,255,.05);padding:80px 32px;box-sizing:border-box;}
-@media(min-width:768px){.section{flex-direction:row;gap:64px;padding:80px 64px;}}
-.section.reversed{flex-direction:column;}
-@media(min-width:768px){.section.reversed{flex-direction:row-reverse;}}
-.avatar-wrap{width:100%;flex-shrink:0;display:flex;justify-content:center;}
-@media(min-width:768px){.avatar-wrap{width:36%;}}
-.avatar-wrap .avatar-box{width:280px;height:280px;filter:drop-shadow(0 0 60px rgba(180,220,255,.15));}
-@media(min-width:768px){.avatar-wrap .avatar-box{width:420px;height:420px;}}
-.copy{opacity:0;transform:translateY(24px);width:100%;display:flex;flex-direction:column;gap:24px;border-radius:16px;border:1px solid rgba(255,255,255,.15);background:rgba(0,0,0,.4);box-shadow:0 8px 32px rgba(0,0,0,.35);padding:32px;box-sizing:border-box;}
-@media(min-width:768px){.copy{width:64%;}}
-.eyebrow{font-size:.75rem;font-weight:500;text-transform:uppercase;letter-spacing:.05em;color:rgba(255,255,255,.3);}
-.copy h2{font-size:1rem;font-weight:500;margin:0;}
-@media(min-width:768px){.copy h2{font-size:1.125rem;}}
+.section{position:relative;border-top:1px solid rgba(255,255,255,.05);padding:64px 24px;box-sizing:border-box;}
+@media(min-width:768px){.section{padding:96px 48px;}}
 .big-text{font-weight:500;line-height:1.5;letter-spacing:-0.01em;font-size:clamp(0.9375rem, 1.25vw, 1.125rem);margin:0;}
 .word{color:rgba(255,255,255,.25);transition:color .15s;}
 .word.spoken{color:#fff;}
@@ -1477,14 +1369,19 @@ function renderSpace(project: Project, avatars: Avatar[], supabaseUrl: string): 
       const words = chunk.narrativeText.split(/\s+/).filter(Boolean);
       const wordsHtml = words.map((w) => `<span class="word">${escapeHtml(w)} </span>`).join("");
       return `
-<section class="section${index % 2 === 1 ? " reversed" : ""}">
-  <div class="avatar-wrap">${avatarBoxHtml(avatarImage, avatar)}</div>
-  <div class="copy">
-    <span class="eyebrow">${String(index + 1).padStart(2, "0")} / ${String(project.chunks.length).padStart(2, "0")}</span>
-    <h2>${escapeHtml(chunk.title)}</h2>
-    <p class="big-text">${wordsHtml}</p>
-    ${src ? `<audio src="${src}"></audio>` : ""}
-  </div>
+<section class="section">
+  ${chapterBlock({
+    theme: CHAPTER_THEMES.space,
+    index,
+    total: project.chunks.length,
+    eyebrow: `${String(index + 1).padStart(2, "0")} / ${String(project.chunks.length).padStart(2, "0")}`,
+    title: chunk.title,
+    textHtml: `<p class="big-text">${wordsHtml}</p>`,
+    audioSrc: src,
+    sceneUrl: chunk.imageUrl,
+    avatarMarkup: avatarBoxHtml(avatarImage, avatar),
+    lists: chunkLists(project.chunks, index),
+  })}
 </section>`;
     })
     .join("\n");
@@ -1496,51 +1393,12 @@ ${sectionsHtml}
 ${narrationGateMarkup(hasChunkNarration(project, supabaseUrl), "space")}
 `;
 
-  // Word-highlight scroll wiring (same mechanism as renderEditorial/renderCaseStudy)
+  // Word-highlight scroll wiring (same mechanism as renderCaseStudy)
   // plus the shared ASMR_INIT_JS canvas particle field — the fixed #asmr-canvas
   // sits behind every section, not just a single hero screen.
   const js = `
 gsap.registerPlugin(ScrollTrigger);
-var currentAudio = null;
-var currentHandler = null;
-
-function stopHighlightTracking() {
-  if (currentAudio && currentHandler) currentAudio.removeEventListener('timeupdate', currentHandler);
-  currentHandler = null;
-}
-
-// Driven by the <audio> element's own "timeupdate" event rather than
-// requestAnimationFrame — rAF is tied to the page's paint loop, which
-// browsers throttle or pause outright once a tab isn't the actively
-// rendered one, silently freezing the highlight mid-playback even though
-// the audio itself keeps going. "timeupdate" is a native media event that
-// fires from the audio/video decode pipeline, independent of paint
-// throttling, so the highlight can't desync from playback.
-//
-// The TTS server doesn't return real per-word timestamps, so word position
-// is estimated from elapsed time — but weighted by each word's character
-// count (plus a fixed per-word floor) rather than splitting the audio into
-// equal-length slices. Equal slices visibly drift out of sync on real
-// narration ("a" and "extraordinarily" do not take the same time to say);
-// length-weighting tracks natural speech pacing far more closely.
-function trackHighlight(audio, words) {
-  var weights = words.map(function(word) { return (word.textContent || '').trim().length + 3; });
-  var totalWeight = weights.reduce(function(sum, w) { return sum + w; }, 0);
-  var cumulativeWeights = [];
-  var running = 0;
-  weights.forEach(function(w) { running += w; cumulativeWeights.push(running); });
-
-  function onTimeUpdate() {
-    if (!audio.duration) return;
-    var targetWeight = (audio.currentTime / audio.duration) * totalWeight;
-    var activeIndex = cumulativeWeights.findIndex(function(w) { return w >= targetWeight; });
-    if (activeIndex === -1) activeIndex = words.length - 1;
-    words.forEach(function(word, i) { word.classList.toggle('spoken', i <= activeIndex); });
-  }
-  audio.addEventListener('timeupdate', onTimeUpdate);
-  currentHandler = onTimeUpdate;
-}
-
+${TRACK_HIGHLIGHT_JS}
 ` + SCROLL_NARRATION_JS + ASMR_INIT_JS;
 
   const needsModel = needsAvatarModel(avatars);
@@ -1561,19 +1419,8 @@ function renderLunar(project: Project, avatars: Avatar[], supabaseUrl: string): 
 .header .kicker{font-size:.75rem;font-weight:300;text-transform:uppercase;letter-spacing:.4em;color:rgba(103,232,249,.4);}
 .header h1{margin:16px 0 0;max-width:760px;font-size:1.5rem;font-weight:500;line-height:1.2;}
 @media(min-width:768px){.header h1{font-size:1.75rem;}}
-.section{position:relative;min-height:100vh;display:flex;flex-direction:column;align-items:center;gap:40px;border-top:1px solid rgba(34,211,238,.1);padding:80px 32px;box-sizing:border-box;}
-@media(min-width:768px){.section{flex-direction:row;gap:64px;padding:80px 64px;}}
-.section.reversed{flex-direction:column;}
-@media(min-width:768px){.section.reversed{flex-direction:row-reverse;}}
-.avatar-wrap{width:100%;flex-shrink:0;display:flex;justify-content:center;}
-@media(min-width:768px){.avatar-wrap{width:36%;}}
-.avatar-wrap .avatar-box{width:280px;height:280px;filter:drop-shadow(0 0 60px rgba(120,180,255,.2));}
-@media(min-width:768px){.avatar-wrap .avatar-box{width:420px;height:420px;}}
-.copy{opacity:0;transform:translateY(24px);width:100%;display:flex;flex-direction:column;gap:24px;border-radius:16px;border:1px solid rgba(103,232,249,.2);background:rgba(0,0,0,.4);box-shadow:0 8px 32px rgba(0,0,0,.35);padding:32px;box-sizing:border-box;}
-@media(min-width:768px){.copy{width:64%;}}
-.eyebrow{font-size:.75rem;font-weight:500;text-transform:uppercase;letter-spacing:.05em;color:rgba(165,243,252,.5);}
-.copy h2{font-size:1rem;font-weight:500;margin:0;}
-@media(min-width:768px){.copy h2{font-size:1.125rem;}}
+.section{position:relative;border-top:1px solid rgba(34,211,238,.1);padding:64px 24px;box-sizing:border-box;}
+@media(min-width:768px){.section{padding:96px 48px;}}
 .big-text{font-weight:500;line-height:1.5;letter-spacing:-0.01em;font-size:clamp(0.9375rem, 1.25vw, 1.125rem);margin:0;}
 .word{color:rgba(255,255,255,.25);transition:color .15s;}
 .word.spoken{color:#fff;}
@@ -1593,14 +1440,19 @@ function renderLunar(project: Project, avatars: Avatar[], supabaseUrl: string): 
       const words = chunk.narrativeText.split(/\s+/).filter(Boolean);
       const wordsHtml = words.map((w) => `<span class="word">${escapeHtml(w)} </span>`).join("");
       return `
-<section class="section${index % 2 === 1 ? " reversed" : ""}">
-  <div class="avatar-wrap">${avatarMarkup}</div>
-  <div class="copy">
-    <span class="eyebrow">${String(index + 1).padStart(2, "0")} / ${String(project.chunks.length).padStart(2, "0")}</span>
-    <h2>${escapeHtml(chunk.title)}</h2>
-    <p class="big-text">${wordsHtml}</p>
-    ${src ? `<audio src="${src}"></audio>` : ""}
-  </div>
+<section class="section">
+  ${chapterBlock({
+    theme: CHAPTER_THEMES.lunar,
+    index,
+    total: project.chunks.length,
+    eyebrow: `${String(index + 1).padStart(2, "0")} / ${String(project.chunks.length).padStart(2, "0")}`,
+    title: chunk.title,
+    textHtml: `<p class="big-text">${wordsHtml}</p>`,
+    audioSrc: src,
+    sceneUrl: chunk.imageUrl,
+    avatarMarkup: avatarMarkup,
+    lists: chunkLists(project.chunks, index),
+  })}
 </section>`;
     })
     .join("\n");
@@ -1616,32 +1468,7 @@ ${narrationGateMarkup(hasChunkNarration(project, supabaseUrl), "lunar")}
   // sits behind every section, not just a single hero screen.
   const js = `
 gsap.registerPlugin(ScrollTrigger);
-var currentAudio = null;
-var currentHandler = null;
-
-function stopHighlightTracking() {
-  if (currentAudio && currentHandler) currentAudio.removeEventListener('timeupdate', currentHandler);
-  currentHandler = null;
-}
-
-function trackHighlight(audio, words) {
-  var weights = words.map(function(word) { return (word.textContent || '').trim().length + 3; });
-  var totalWeight = weights.reduce(function(sum, w) { return sum + w; }, 0);
-  var cumulativeWeights = [];
-  var running = 0;
-  weights.forEach(function(w) { running += w; cumulativeWeights.push(running); });
-
-  function onTimeUpdate() {
-    if (!audio.duration) return;
-    var targetWeight = (audio.currentTime / audio.duration) * totalWeight;
-    var activeIndex = cumulativeWeights.findIndex(function(w) { return w >= targetWeight; });
-    if (activeIndex === -1) activeIndex = words.length - 1;
-    words.forEach(function(word, i) { word.classList.toggle('spoken', i <= activeIndex); });
-  }
-  audio.addEventListener('timeupdate', onTimeUpdate);
-  currentHandler = onTimeUpdate;
-}
-
+${TRACK_HIGHLIGHT_JS}
 ` + SCROLL_NARRATION_JS + LUNAR_INIT_JS;
 
   // Lunar prefers video over the 3D model (see sectionsHtml above), so the
@@ -1681,19 +1508,8 @@ body{margin:0;font-family:-apple-system,'Segoe UI',sans-serif;background:#05070d
 #airlock-skip:focus-visible{opacity:1;outline:2px solid #f2f4f8;outline-offset:2px;}
 #airlock-progress-track{position:absolute;inset-inline:0;bottom:0;height:2px;background:rgba(255,255,255,.12);}
 #airlock-bar{height:100%;width:100%;transform-origin:left;background:linear-gradient(90deg, rgba(255,255,255,0.45), rgba(255,255,255,0.95));transform:scaleX(0);}
-.section{min-height:100vh;display:flex;flex-direction:column;align-items:center;gap:40px;border-top:1px solid rgba(255,255,255,.05);padding:80px 32px;box-sizing:border-box;}
-@media(min-width:768px){.section{flex-direction:row;gap:64px;padding:80px 64px;}}
-.section.reversed{flex-direction:column;}
-@media(min-width:768px){.section.reversed{flex-direction:row-reverse;}}
-.avatar-wrap{width:100%;flex-shrink:0;display:flex;justify-content:center;}
-@media(min-width:768px){.avatar-wrap{width:36%;}}
-.avatar-wrap .avatar-box{width:280px;height:280px;filter:drop-shadow(0 0 60px rgba(255,255,255,.1));}
-@media(min-width:768px){.avatar-wrap .avatar-box{width:420px;height:420px;}}
-.copy{opacity:0;transform:translateY(24px);width:100%;display:flex;flex-direction:column;gap:24px;border-radius:16px;border:1px solid rgba(255,255,255,.15);background:rgba(0,0,0,.4);box-shadow:0 8px 32px rgba(0,0,0,.35);padding:32px;box-sizing:border-box;}
-@media(min-width:768px){.copy{width:64%;}}
-.eyebrow{font-size:.75rem;font-weight:500;text-transform:uppercase;letter-spacing:.05em;color:rgba(255,255,255,.3);}
-.copy h2{font-size:1rem;font-weight:500;margin:0;}
-@media(min-width:768px){.copy h2{font-size:1.125rem;}}
+.section{border-top:1px solid rgba(255,255,255,.05);padding:64px 24px;box-sizing:border-box;}
+@media(min-width:768px){.section{padding:96px 48px;}}
 .big-text{font-weight:500;line-height:1.5;letter-spacing:-0.01em;font-size:clamp(0.9375rem, 1.25vw, 1.125rem);margin:0;}
 .word{color:rgba(255,255,255,.25);transition:color .15s;}
 .word.spoken{color:#fff;}
@@ -1739,6 +1555,8 @@ const AIRLOCK_INIT_JS = `
   var scrim = document.getElementById('airlock-scrim');
   var skipBtn = document.getElementById('airlock-skip');
   if (!video || !section) return;
+  var h1 = titleWrap ? titleWrap.querySelector('h1') : null;
+  var tagP = taglineWrap ? taglineWrap.querySelector('p') : null;
 
   var reduceMotion = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
   var duration = 0, rafId = 0, target = 0, shown = 0, moved = false, seeking = false, queued = null;
@@ -1771,18 +1589,16 @@ const AIRLOCK_INIT_JS = `
     var taglineAlpha = clamp((videoP - 0.82) / 0.18, 0, 1);
     video.style.transform = 'scale(' + (1 + videoP * 0.06) + ')';
     if (scrim) scrim.style.opacity = String(Math.max(titleAlpha, taglineAlpha));
-    if (titleWrap) {
-      var h1 = titleWrap.querySelector('h1');
+    if (h1) {
       h1.style.opacity = String(titleAlpha);
       h1.style.transform = 'translateY(' + ((1 - titleAlpha) * -24) + 'px) scale(' + (0.96 + titleAlpha * 0.04) + ')';
       h1.style.filter = 'blur(' + ((1 - titleAlpha) * 10) + 'px)';
     }
     if (hint) hint.style.opacity = moved ? '0' : '1';
-    if (taglineWrap) {
-      var p_ = taglineWrap.querySelector('p');
+    if (taglineWrap && tagP) {
       taglineWrap.style.opacity = String(taglineAlpha);
-      p_.style.transform = 'translateY(' + ((1 - taglineAlpha) * 20) + 'px) scale(' + (0.97 + taglineAlpha * 0.03) + ')';
-      p_.style.filter = 'blur(' + ((1 - taglineAlpha) * 8) + 'px)';
+      tagP.style.transform = 'translateY(' + ((1 - taglineAlpha) * 20) + 'px) scale(' + (0.97 + taglineAlpha * 0.03) + ')';
+      tagP.style.filter = 'blur(' + ((1 - taglineAlpha) * 8) + 'px)';
     }
     if (bar) bar.style.transform = 'scaleX(' + p + ')';
   }
@@ -1794,6 +1610,10 @@ const AIRLOCK_INIT_JS = `
     lockedY = window.scrollY;
     var b = document.body.style;
     b.position = 'fixed'; b.top = '-' + lockedY + 'px'; b.left = '0'; b.right = '0'; b.width = '100%';
+    // The listeners that can cancel a scroll are non-passive, so they exist only
+    // while the hero holds the page: afterwards the page scrolls without waiting on them.
+    window.addEventListener('wheel', onWheel, { passive: false });
+    window.addEventListener('touchmove', onTouchMove, { passive: false });
   }
   function releaseLock() {
     if (!locked) return;
@@ -1801,6 +1621,8 @@ const AIRLOCK_INIT_JS = `
     var y = lockedY;
     var b = document.body.style;
     b.position = ''; b.top = ''; b.left = ''; b.right = ''; b.width = '';
+    window.removeEventListener('wheel', onWheel);
+    window.removeEventListener('touchmove', onTouchMove);
     window.scrollTo(0, y);
     released = true;
     lastY = y;
@@ -1819,6 +1641,7 @@ const AIRLOCK_INIT_JS = `
     if (target >= 1 && shown > 0.98 && deltaY > 0) { releaseLock(); return false; }
     target = clamp(target + deltaY / totalDistance, 0, 1);
     if (target > 0.001) moved = true;
+    kick();
     return true;
   }
 
@@ -1846,7 +1669,23 @@ const AIRLOCK_INIT_JS = `
       target = shown = 1;
       paint(1);
       engageLock();
+      kick();
     }
+  }
+
+  // The paint loop runs only while the picture is catching up with the input,
+  // not for the life of the page.
+  var running = false;
+  function frame() {
+    shown += (target - shown) * 0.18;
+    if (Math.abs(target - shown) < 0.0005) shown = target;
+    paint(shown);
+    if (shown !== target) rafId = requestAnimationFrame(frame); else running = false;
+  }
+  function kick() {
+    if (running) return;
+    running = true;
+    rafId = requestAnimationFrame(frame);
   }
 
   video.addEventListener('loadeddata', function() {
@@ -1857,16 +1696,10 @@ const AIRLOCK_INIT_JS = `
 
   if (!reduceMotion) {
     if (window.scrollY <= section.offsetTop + 1) engageLock();
-    window.addEventListener('wheel', onWheel, { passive: false });
     window.addEventListener('touchstart', onTouchStart, { passive: true });
-    window.addEventListener('touchmove', onTouchMove, { passive: false });
     window.addEventListener('keydown', onKeyDown);
     window.addEventListener('scroll', onScroll, { passive: true });
-    (function frame() {
-      shown += (target - shown) * 0.18;
-      paint(shown);
-      rafId = requestAnimationFrame(frame);
-    })();
+    kick();
   }
 })();
 `;
@@ -1882,14 +1715,19 @@ function renderAirlock(project: Project, avatars: Avatar[], supabaseUrl: string)
       const words = chunk.narrativeText.split(/\s+/).filter(Boolean);
       const wordsHtml = words.map((w) => `<span class="word">${escapeHtml(w)} </span>`).join("");
       return `
-<section class="section${index % 2 === 1 ? " reversed" : ""}">
-  <div class="avatar-wrap">${avatarBoxHtml(avatarImage, avatar)}</div>
-  <div class="copy">
-    <span class="eyebrow">${String(index + 1).padStart(2, "0")} / ${String(project.chunks.length).padStart(2, "0")}</span>
-    <h2>${escapeHtml(chunk.title)}</h2>
-    <p class="big-text">${wordsHtml}</p>
-    ${src ? `<audio src="${src}"></audio>` : ""}
-  </div>
+<section class="section">
+  ${chapterBlock({
+    theme: CHAPTER_THEMES.airlock,
+    index,
+    total: project.chunks.length,
+    eyebrow: `${String(index + 1).padStart(2, "0")} / ${String(project.chunks.length).padStart(2, "0")}`,
+    title: chunk.title,
+    textHtml: `<p class="big-text">${wordsHtml}</p>`,
+    audioSrc: src,
+    sceneUrl: chunk.imageUrl,
+    avatarMarkup: avatarBoxHtml(avatarImage, avatar),
+    lists: chunkLists(project.chunks, index),
+  })}
 </section>`;
     })
     .join("\n");
@@ -1902,32 +1740,7 @@ ${narrationGateMarkup(hasChunkNarration(project, supabaseUrl), "airlock")}
 
   const js = `
 gsap.registerPlugin(ScrollTrigger);
-var currentAudio = null;
-var currentHandler = null;
-
-function stopHighlightTracking() {
-  if (currentAudio && currentHandler) currentAudio.removeEventListener('timeupdate', currentHandler);
-  currentHandler = null;
-}
-
-function trackHighlight(audio, words) {
-  var weights = words.map(function(word) { return (word.textContent || '').trim().length + 3; });
-  var totalWeight = weights.reduce(function(sum, w) { return sum + w; }, 0);
-  var cumulativeWeights = [];
-  var running = 0;
-  weights.forEach(function(w) { running += w; cumulativeWeights.push(running); });
-
-  function onTimeUpdate() {
-    if (!audio.duration) return;
-    var targetWeight = (audio.currentTime / audio.duration) * totalWeight;
-    var activeIndex = cumulativeWeights.findIndex(function(w) { return w >= targetWeight; });
-    if (activeIndex === -1) activeIndex = words.length - 1;
-    words.forEach(function(word, i) { word.classList.toggle('spoken', i <= activeIndex); });
-  }
-  audio.addEventListener('timeupdate', onTimeUpdate);
-  currentHandler = onTimeUpdate;
-}
-
+${TRACK_HIGHLIGHT_JS}
 ` + SCROLL_NARRATION_JS + AIRLOCK_INIT_JS;
 
   const needsModel = needsAvatarModel(avatars);
@@ -1951,28 +1764,26 @@ function renderCaseStudy(project: Project, avatars: Avatar[], supabaseUrl: strin
   // "airlock" there is still how they opt into those templates'
   // backgrounds/heroes rather than losing access to them entirely.
   const theme: CaseStudyRenderTheme =
-    project.selectedTemplateId === "space" ||
-    project.selectedTemplateId === "lunar" ||
-    project.selectedTemplateId === "airlock"
+    (project.selectedTemplateId === "space" ||
+      project.selectedTemplateId === "lunar" ||
+      project.selectedTemplateId === "airlock") &&
+    isTemplateAvailable(project.selectedTemplateId)
       ? project.selectedTemplateId
       : "light";
   const isDark = theme !== "light";
   const kicker = theme === "space" ? "Space" : theme === "lunar" ? "Lunar" : "Case study";
   const kickerColor = theme === "lunar" ? "rgba(103,232,249,.4)" : isDark ? "rgba(255,255,255,.3)" : "#a3a3a3";
-  const eyebrowColor = theme === "lunar" ? "rgba(165,243,252,.6)" : isDark ? "rgba(255,255,255,.4)" : "#a3a3a3";
   const borderColor = theme === "lunar" ? "rgba(34,211,238,.1)" : isDark ? "rgba(255,255,255,.05)" : "#f0f0f0";
-  const avatarGlow = theme === "lunar" ? "rgba(120,180,255,.2)" : "rgba(180,220,255,.15)";
   // Deliberately more opaque than borderColor/section dividers above: this is
   // the actual glass card the body copy sits on. No blur — a dark, mostly
   // transparent tint darkens the busy background just enough for text to
   // read, while keeping the background (moon surface, starfield) sharp and
   // visible through the card rather than dissolved into a blurred wash.
   const panelBorderColor = theme === "lunar" ? "rgba(103,232,249,.2)" : "rgba(255,255,255,.15)";
-  const panelBg = "rgba(0,0,0,.4)";
 
-  // Same big-text, word-highlight-as-spoken treatment as renderEditorial —
-  // this template is the case-study data source with Editorial's visuals,
-  // with a dark backdrop (particle field or 3D moon scene) when isDark.
+  // Big-text, word-highlight-as-spoken treatment: the case-study data source
+  // with the light look, or a dark backdrop (particle field or 3D moon scene)
+  // when isDark.
   const css =
     (isDark
       ? theme === "lunar"
@@ -1986,23 +1797,8 @@ function renderCaseStudy(project: Project, avatars: Avatar[], supabaseUrl: strin
 .header .kicker{font-size:.75rem;text-transform:uppercase;letter-spacing:${isDark ? ".4em" : ".05em"};font-weight:${isDark ? "300" : "400"};color:${kickerColor};}
 .header h1{margin:12px 0 0;max-width:760px;font-size:1.5rem;font-weight:500;line-height:1.2;}
 @media(min-width:768px){.header h1{font-size:1.75rem;}}
-.section{${isDark ? "position:relative;" : ""}min-height:100vh;display:flex;flex-direction:column;align-items:center;gap:40px;border-top:1px solid ${borderColor};padding:80px 32px;box-sizing:border-box;}
-@media(min-width:768px){.section{flex-direction:row;gap:64px;padding:80px 64px;}}
-.section.reversed{flex-direction:column;}
-@media(min-width:768px){.section.reversed{flex-direction:row-reverse;}}
-.avatar-wrap{width:100%;flex-shrink:0;display:flex;justify-content:center;}
-@media(min-width:768px){.avatar-wrap{width:36%;}}
-.avatar-wrap .avatar-box{width:280px;height:280px;${isDark ? `filter:drop-shadow(0 0 60px ${avatarGlow});` : ""}}
-@media(min-width:768px){.avatar-wrap .avatar-box{width:420px;height:420px;}}
-.copy{opacity:0;transform:translateY(24px);width:100%;display:flex;flex-direction:column;gap:24px;${
-      isDark
-        ? `border-radius:16px;border:1px solid ${panelBorderColor};background:${panelBg};box-shadow:0 8px 32px rgba(0,0,0,.35);padding:32px;box-sizing:border-box;`
-        : ""
-    }}
-@media(min-width:768px){.copy{width:64%;}}
-.eyebrow{font-size:.75rem;font-weight:500;text-transform:uppercase;letter-spacing:.05em;color:${eyebrowColor};}
-.copy h2{font-size:1rem;font-weight:500;margin:0;}
-@media(min-width:768px){.copy h2{font-size:1.125rem;}}
+.section{${isDark ? "position:relative;" : ""}border-top:1px solid ${borderColor};padding:64px 24px;box-sizing:border-box;}
+@media(min-width:768px){.section{padding:96px 48px;}}
 .big-text{font-weight:500;line-height:1.5;letter-spacing:-0.01em;font-size:clamp(0.9375rem, 1.25vw, 1.125rem);margin:0;}
 .word{color:${isDark ? "rgba(255,255,255,.25)" : "#d4d4d4"};transition:color .15s;}
 .word.spoken{color:${isDark ? "#fff" : "#171717"};}
@@ -2023,14 +1819,21 @@ function renderCaseStudy(project: Project, avatars: Avatar[], supabaseUrl: strin
       const words = section.body.split(/\s+/).filter(Boolean);
       const wordsHtml = words.map((w) => `<span class="word">${escapeHtml(w)} </span>`).join("");
       return `
-<section class="section${index % 2 === 1 ? " reversed" : ""}">
-  <div class="avatar-wrap">${avatarMarkup}</div>
-  <div class="copy">
-    <span class="eyebrow">${escapeHtml(section.sectionLabel)}</span>
-    <h2>${escapeHtml(section.title)}</h2>
-    <p class="big-text">${wordsHtml}</p>
-    ${src ? `<audio src="${src}"></audio>` : ""}
-  </div>
+<section class="section">
+  ${chapterBlock({
+    theme: isDark ? CHAPTER_THEMES[theme as "space" | "lunar" | "airlock"] : CHAPTER_THEMES.light,
+    index,
+    total: sections.length,
+    eyebrow: section.sectionLabel,
+    title: section.title,
+    textHtml: `<p class="big-text">${wordsHtml}</p>`,
+    audioSrc: src,
+    avatarMarkup,
+    lists: chapterLists(
+      sections.map((x) => ({ title: x.title, text: x.body })),
+      index
+    ),
+  })}
 </section>`;
     })
     .join("\n");
@@ -2056,46 +1859,7 @@ ${narrationGateMarkup(hasNarration, theme)}
 
   const js = `
 gsap.registerPlugin(ScrollTrigger);
-var currentAudio = null;
-var currentHandler = null;
-
-function stopHighlightTracking() {
-  if (currentAudio && currentHandler) currentAudio.removeEventListener('timeupdate', currentHandler);
-  currentHandler = null;
-}
-
-// Driven by the <audio> element's own "timeupdate" event rather than
-// requestAnimationFrame — rAF is tied to the page's paint loop, which
-// browsers throttle or pause outright once a tab isn't the actively
-// rendered one, silently freezing the highlight mid-playback even though
-// the audio itself keeps going. "timeupdate" is a native media event that
-// fires from the audio/video decode pipeline, independent of paint
-// throttling, so the highlight can't desync from playback.
-//
-// The TTS server doesn't return real per-word timestamps, so word position
-// is estimated from elapsed time — but weighted by each word's character
-// count (plus a fixed per-word floor) rather than splitting the audio into
-// equal-length slices. Equal slices visibly drift out of sync on real
-// narration ("a" and "extraordinarily" do not take the same time to say);
-// length-weighting tracks natural speech pacing far more closely.
-function trackHighlight(audio, words) {
-  var weights = words.map(function(word) { return (word.textContent || '').trim().length + 3; });
-  var totalWeight = weights.reduce(function(sum, w) { return sum + w; }, 0);
-  var cumulativeWeights = [];
-  var running = 0;
-  weights.forEach(function(w) { running += w; cumulativeWeights.push(running); });
-
-  function onTimeUpdate() {
-    if (!audio.duration) return;
-    var targetWeight = (audio.currentTime / audio.duration) * totalWeight;
-    var activeIndex = cumulativeWeights.findIndex(function(w) { return w >= targetWeight; });
-    if (activeIndex === -1) activeIndex = words.length - 1;
-    words.forEach(function(word, i) { word.classList.toggle('spoken', i <= activeIndex); });
-  }
-  audio.addEventListener('timeupdate', onTimeUpdate);
-  currentHandler = onTimeUpdate;
-}
-
+${TRACK_HIGHLIGHT_JS}
 ` + SCROLL_NARRATION_JS + (theme === "space" ? ASMR_INIT_JS : theme === "lunar" ? LUNAR_INIT_JS : theme === "airlock" ? AIRLOCK_INIT_JS : "");
 
   // Lunar prefers video over the 3D model (see sectionsHtml above), so the
@@ -2115,7 +1879,32 @@ function trackHighlight(audio, words) {
   );
 }
 
+/** Thrown by renderStaticSite when the project's template is missing, removed or hidden. The publish route answers it with a 400. */
+export class TemplateUnavailableError extends Error {
+  constructor() {
+    super(TEMPLATE_UNAVAILABLE_MESSAGE);
+    this.name = "TemplateUnavailableError";
+  }
+}
+
+/**
+ * Renders the published page for a project. `project.logoUrl` and each chunk's
+ * `imageUrl` must already be bundle-relative paths (or absolute URLs): the
+ * publish route downloads those files into the deploy bundle and rewrites the
+ * URLs before calling this. Without them the output is unchanged.
+ */
 export function renderStaticSite(
+  project: Project,
+  avatars: Avatar[],
+  supabaseUrl: string,
+  options: { voyage?: VoyageSiteOptions } = {}
+): string {
+  const html = renderStaticSiteBody(project, avatars, supabaseUrl, options);
+  // Showcase is left as it was: no logo, no scene images.
+  return project.selectedTemplateId === "showcase" ? html : injectStoryLogo(html, project.logoUrl);
+}
+
+function renderStaticSiteBody(
   project: Project,
   avatars: Avatar[],
   supabaseUrl: string,
@@ -2126,13 +1915,13 @@ export function renderStaticSite(
   // templates below, regardless of selectedTemplateId.
   if (project.documentType === "case-study" && project.caseStudyBinding?.slots) {
     // Voyage is chunk-based: feed it the case study's sections as chapters.
-    if (project.selectedTemplateId === "voyage") {
+    if (project.selectedTemplateId === "voyage" && isTemplateAvailable("voyage")) {
       const sections = flattenCaseStudySections(project.caseStudyBinding.slots);
       const chunks = caseStudySectionsAsChunks(sections, project.caseStudyBinding.sectionAudio);
       return renderVoyage({ ...project, chunks }, avatars, supabaseUrl, options.voyage);
     }
     // Showcase too.
-    if (project.selectedTemplateId === "showcase") {
+    if (project.selectedTemplateId === "showcase" && isTemplateAvailable("showcase")) {
       const sections = flattenCaseStudySections(project.caseStudyBinding.slots);
       const chunks = caseStudySectionsAsChunks(sections, project.caseStudyBinding.sectionAudio);
       return renderShowcase({ ...project, chunks }, avatars, supabaseUrl);
@@ -2140,11 +1929,10 @@ export function renderStaticSite(
     return renderCaseStudy(project, avatars, supabaseUrl);
   }
 
+  // A missing, removed or hidden template never falls back to a surprise look.
+  if (!isTemplateAvailable(project.selectedTemplateId)) throw new TemplateUnavailableError();
+
   switch (project.selectedTemplateId) {
-    case "clarity":
-      return renderClarity(project, avatars, supabaseUrl);
-    case "cinematic":
-      return renderCinematic(project, avatars, supabaseUrl);
     case "space":
       return renderSpace(project, avatars, supabaseUrl);
     case "lunar":
@@ -2155,8 +1943,7 @@ export function renderStaticSite(
       return renderVoyage(project, avatars, supabaseUrl, options.voyage);
     case "showcase":
       return renderShowcase(project, avatars, supabaseUrl);
-    case "editorial":
     default:
-      return renderEditorial(project, avatars, supabaseUrl);
+      throw new TemplateUnavailableError();
   }
 }

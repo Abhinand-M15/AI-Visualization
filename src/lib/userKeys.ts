@@ -20,10 +20,11 @@
  */
 import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
 import { getSupabase } from "@/lib/db";
+import type { ImageProviderId } from "@/lib/imageGen/types";
 import type { AppUser } from "@/lib/auth/session";
 
-export type KeyProvider = "gemini";
-export const KEY_PROVIDERS: readonly KeyProvider[] = ["gemini"] as const;
+export type KeyProvider = "gemini" | "openai";
+export const KEY_PROVIDERS: readonly KeyProvider[] = ["gemini", "openai"] as const;
 
 export function isKeyProvider(value: unknown): value is KeyProvider {
   return typeof value === "string" && (KEY_PROVIDERS as readonly string[]).includes(value);
@@ -172,8 +173,14 @@ export async function getKeyStatus(userId: string): Promise<KeyStatus[]> {
 export class MissingApiKeyError extends Error {
   readonly code = "missing_api_key";
   readonly status = 412;
-  constructor(message = "Add your Gemini API key in Settings before generating.") {
-    super(message);
+  /** Pass a provider for a provider-aware message; no argument keeps the original Gemini wording. */
+  constructor(message?: string, provider?: KeyProvider) {
+    super(
+      message ??
+        (provider === "openai"
+          ? "Add your OpenAI API key in Settings before generating images with OpenAI."
+          : "Add your Gemini API key in Settings before generating.")
+    );
     this.name = "MissingApiKeyError";
   }
 }
@@ -223,4 +230,70 @@ export async function testGeminiKey(key: string): Promise<{ ok: boolean; message
   } catch (error) {
     return { ok: false, message: `Could not reach Gemini: ${error instanceof Error ? error.message : String(error)}` };
   }
+}
+
+/**
+ * Makes one cheap, read-only OpenAI request (list models) with `key`.
+ * Endpoint per OpenAI's API reference: GET https://api.openai.com/v1/models, Bearer auth.
+ * Never throws and never echoes the key back.
+ */
+export async function testOpenAiKey(key: string): Promise<{ ok: boolean; message: string }> {
+  try {
+    const res = await fetch("https://api.openai.com/v1/models", {
+      headers: { Authorization: `Bearer ${key.trim()}` },
+      cache: "no-store",
+    });
+    if (res.ok) return { ok: true, message: "Key works. OpenAI accepted it." };
+    let detail = "";
+    try {
+      const body = (await res.json()) as { error?: { message?: string } };
+      detail = body.error?.message ?? "";
+    } catch {
+      // ignore unparsable body
+    }
+    // OpenAI's error text can quote a masked key; never pass it through verbatim.
+    detail = detail.replace(/sk-[A-Za-z0-9_*-]+/g, "sk-…");
+    if (res.status === 401 || res.status === 403) {
+      return { ok: false, message: detail || "OpenAI rejected this key." };
+    }
+    return { ok: false, message: `OpenAI returned HTTP ${res.status}${detail ? `: ${detail}` : ""}` };
+  } catch (error) {
+    return { ok: false, message: `Could not reach OpenAI: ${error instanceof Error ? error.message : String(error)}` };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Image provider choice (profiles.image_provider, migration 003)
+// ---------------------------------------------------------------------------
+
+export function isImageProvider(value: unknown): value is ImageProviderId {
+  return value === "gemini" || value === "openai";
+}
+
+function isMissingColumn(error: { code?: string; message?: string }): boolean {
+  return (
+    ["42P01", "42703", "PGRST204", "PGRST205"].includes(error.code ?? "") ||
+    /schema cache|does not exist/i.test(error.message ?? "")
+  );
+}
+
+/** The user's chosen image provider; "gemini" by default or when the column isn't there yet. */
+export async function getImageProviderFor(userId: string): Promise<ImageProviderId> {
+  const { data, error } = await getSupabase().from("profiles").select("image_provider").eq("id", userId).maybeSingle();
+  if (error) {
+    if (isMissingColumn(error)) return "gemini";
+    throw new Error(`Could not read image provider: ${error.message}`);
+  }
+  const value = (data as { image_provider?: unknown } | null)?.image_provider;
+  return isImageProvider(value) ? value : "gemini";
+}
+
+export async function setImageProviderFor(userId: string, id: ImageProviderId): Promise<void> {
+  if (!isImageProvider(id)) throw new Error("Unknown image provider.");
+  const { data, error } = await getSupabase().from("profiles").update({ image_provider: id }).eq("id", userId).select("id");
+  if (error) {
+    if (isMissingColumn(error)) throw new Error("Image provider choice isn't available yet (database not updated).");
+    throw new Error(`Could not save image provider: ${error.message}`);
+  }
+  if (!data || data.length === 0) throw new Error("Profile not found.");
 }

@@ -5,9 +5,13 @@ import {
   projectListColumns,
   rowToProject,
   rowToProjectSummary,
+  saveProjectDomain,
+  selectWithDomainColumns,
   type ProjectRow,
   type ProjectSummaryRow,
 } from "@/lib/projects";
+import { getDomain } from "@/lib/domains";
+import { pathBelongsTo } from "@/app/api/logos/server";
 import type { Chunk, DocumentType } from "@/lib/types";
 import { bindCaseStudyLayout } from "@/lib/agent/bindCaseStudyLayout";
 import { requireUser, unauthorizedResponse } from "@/lib/auth/session";
@@ -21,6 +25,10 @@ interface CreateProjectBody {
   chunks: Chunk[];
   /** documents.id returned by /api/parse-and-generate for a direct upload (auth on only). */
   documentId?: string;
+  /** Industry domain picked on the upload page (domains.id). Optional. */
+  domainId?: string;
+  /** Company logo path in the company-logos bucket. Optional. */
+  logoPath?: string;
 }
 
 function isCreateProjectBody(value: unknown): value is CreateProjectBody {
@@ -92,6 +100,29 @@ export async function POST(request: Request) {
       documentType: body.documentType,
       chunkCount: body.chunks.length,
     });
+
+    // Domain and company logo. Both are optional and best-effort (nothing is
+    // written, and nothing fails, when they're absent or migration 003 isn't applied).
+    // The domain must exist and the logo must sit in the caller's own folder.
+    const domainId = typeof body.domainId === "string" ? body.domainId : undefined;
+    const logoPath = typeof body.logoPath === "string" && pathBelongsTo(user, body.logoPath) ? body.logoPath : undefined;
+    let validDomainId: string | undefined;
+    if (domainId) {
+      try {
+        validDomainId = (await getDomain(domainId)) ? domainId : undefined;
+      } catch {
+        validDomainId = undefined;
+      }
+    }
+    if (validDomainId || logoPath) {
+      const saved = await saveProjectDomain(supabase, id, { domainId: validDomainId, logoPath });
+      if (saved) {
+        const { data: withDomain } = await selectWithDomainColumns(PROJECT_SELECT_COLUMNS, (columns) =>
+          supabase.from("projects").select(columns).eq("id", id).single()
+        );
+        if (withDomain) project = rowToProject(withDomain as unknown as ProjectRow);
+      }
+    }
 
     // Link the uploaded source document (direct-to-storage upload) to the project.
     if (user && typeof body.documentId === "string" && body.documentId) {

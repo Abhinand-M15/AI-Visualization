@@ -67,6 +67,13 @@ export interface Chunk {
   /** 1-10: how central this chunk is to the case study, per the document's own emphasis. */
   impactScore?: number;
   evidenceGrade?: EvidenceGrade;
+  /**
+   * Cartoon scene image for this chapter (public URL, derived server-side from
+   * chapter_images.image_path; see src/lib/storageUrls.ts). Absent when there is none;
+   * templates then fall back to the avatar as before.
+   */
+  imageUrl?: string;
+  imageStatus?: "pending" | "ready" | "failed";
 }
 
 export interface Storyline {
@@ -150,6 +157,12 @@ export interface Project {
   caseStudyBinding?: CaseStudyBinding | null;
   /** Fingerprint of what was last published; compare with contentFingerprint(project). */
   publication?: PublicationRecord;
+  /** Chosen industry domain (domains.id). Unset when the domains migration isn't applied. */
+  domainId?: string;
+  /** Chosen domain avatar (domain_avatars.id); selectedAvatarIds carries it as `domain:<id>`. */
+  domainAvatarId?: string;
+  /** Public URL of the company logo, derived server-side from projects.logo_path. */
+  logoUrl?: string;
 }
 
 export const ACCEPTED_DOCUMENT_EXTENSIONS = [".pdf", ".pptx", ".xlsx"] as const;

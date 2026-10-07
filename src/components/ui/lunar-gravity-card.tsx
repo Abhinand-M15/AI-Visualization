@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useRef, useMemo, Suspense, useState } from "react";
+import React, { useRef, useMemo, Suspense, useState, useEffect } from "react";
 import { Canvas, useFrame } from "@react-three/fiber";
 import { OrbitControls, useTexture, Environment } from "@react-three/drei";
 import * as THREE from "three";
@@ -38,7 +38,8 @@ const RealisticMoon = ({ onClick }: { onClick?: () => void }) => {
   );
 };
 
-const particlesCount = 60000; 
+// Same counts as the published page (48000 ring particles, 60 asteroids): the shader loops over every asteroid for every particle.
+const particlesCount = 48000;
 const [ringPositions, ringColors, ringRandoms] = (() => {
   const pos = new Float32Array(particlesCount * 3);
   const col = new Float32Array(particlesCount * 3);
@@ -90,8 +91,15 @@ const ParticleRing = ({ ringState, massiveAsteroidsRef }: { ringState: 'hidden' 
 
   const uniforms = useRef({
     uProgress: { value: ringState === 'visible' ? 1.0 : 0.0 },
-    uAsteroids: { value: new Float32Array(75 * 4) },
+    uAsteroids: { value: new Float32Array(60 * 4) },
     time: { value: 0 }
+  });
+
+  // Scratch objects reused every frame (no per-frame allocations).
+  const scratch = useRef({
+    invMat: new THREE.Matrix4(),
+    vec: new THREE.Vector3(),
+    local: new Float32Array(60 * 4),
   });
 
   useFrame((state, delta) => {
@@ -99,10 +107,10 @@ const ParticleRing = ({ ringState, massiveAsteroidsRef }: { ringState: 'hidden' 
       pointsRef.current.rotation.y -= delta * 0.02;
       pointsRef.current.updateMatrix();
 
-      const invMat = new THREE.Matrix4().copy(pointsRef.current.matrix).invert();
-      const localAsteroids = new Float32Array(75 * 4);
-      for(let i=0; i<75; i++) {
-        const ast = new THREE.Vector3(
+      const { invMat, vec: ast, local: localAsteroids } = scratch.current;
+      invMat.copy(pointsRef.current.matrix).invert();
+      for(let i=0; i<60; i++) {
+        ast.set(
           massiveAsteroidsRef.current[i*4],
           massiveAsteroidsRef.current[i*4+1],
           massiveAsteroidsRef.current[i*4+2]
@@ -134,7 +142,7 @@ const ParticleRing = ({ ringState, massiveAsteroidsRef }: { ringState: 'hidden' 
 
     shader.vertexShader = `
       uniform float uProgress;
-      uniform vec4 uAsteroids[75];
+      uniform vec4 uAsteroids[60];
       uniform float time;
       attribute float aRandom;
       varying float vProgress; 
@@ -157,7 +165,7 @@ const ParticleRing = ({ ringState, massiveAsteroidsRef }: { ringState: 'hidden' 
       transformed.y += sin(angle * 10.0 + time) * 0.05 * aRandom;
 
       if (uProgress > 0.5) {
-        for(int i = 0; i < 75; i++) {
+        for(int i = 0; i < 60; i++) {
           vec4 astData = uAsteroids[i];
           vec3 delta = transformed - astData.xyz;
           float dist = length(delta);
@@ -276,7 +284,7 @@ const AsteroidBelt = ({ ringState, massiveAsteroidsRef }: { ringState: 'hidden' 
     'https://cdn.21st.dev/assets/mirror/fc/fcb0f1f5548e6e18d40063dd55c6aacd3daedf2407b181dab85b61e22bf9fe57.jpg'
   ]);
 
-  const count = 75; 
+  const count = 60;
   const dummy = useMemo(() => new THREE.Object3D(), []);
 
   const [asteroids] = useState(() => generateAsteroids(count));
@@ -367,10 +375,30 @@ export default function LunarGravityCard({
   description = "Embed highly realistic astrophysics directly into your Next.js project. Zero configuration, fully interactive, and flawlessly smooth."
 }: LunarGravityCardProps) {
   const [ringState, setRingState] = useState<'hidden' | 'animating' | 'visible'>('hidden');
-  const massiveAsteroidsRef = useRef<Float32Array>(new Float32Array(75 * 4));
+  const massiveAsteroidsRef = useRef<Float32Array>(new Float32Array(60 * 4));
+
+  // Render only while the card is on screen and the tab is visible: the scene
+  // (48000 particles, shadows) used to keep drawing after scrolling past the hero.
+  const wrapRef = useRef<HTMLDivElement>(null);
+  const [onScreen, setOnScreen] = useState(true);
+  const [tabVisible, setTabVisible] = useState(true);
+  useEffect(() => {
+    const el = wrapRef.current;
+    if (!el) return;
+    const io = new IntersectionObserver(([entry]) => setOnScreen(entry.isIntersecting), { threshold: 0 });
+    io.observe(el);
+    const onVisibility = () => setTabVisible(!document.hidden);
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      io.disconnect();
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
+  }, []);
+  // A little lower on small screens, where the GPU is weakest.
+  const dpr: [number, number] = typeof window !== "undefined" && window.innerWidth < 768 ? [1, 1.5] : [1, 2];
 
   return (
-    <div className={cn("w-full max-w-[1000px] min-h-[700px] md:min-h-[auto] md:h-[540px] bg-black rounded-[2.5rem] flex flex-col md:flex-row relative overflow-hidden border border-white/[0.08] shadow-[0_30px_100px_rgba(0,0,0,0.4)]", className)}>
+    <div ref={wrapRef} className={cn("w-full max-w-[1000px] min-h-[700px] md:min-h-[auto] md:h-[540px] bg-black rounded-[2.5rem] flex flex-col md:flex-row relative overflow-hidden border border-white/[0.08] shadow-[0_30px_100px_rgba(0,0,0,0.4)]", className)}>
       
       <div className="absolute top-0 left-0 md:inset-y-0 md:left-0 w-full h-[60%] md:h-full md:w-[60%] bg-gradient-to-b md:bg-gradient-to-r from-black via-black/90 to-transparent z-10 pointer-events-none"></div>
 
@@ -385,11 +413,9 @@ export default function LunarGravityCard({
      
       <div className="relative md:absolute md:right-0 md:top-0 w-full h-[450px] md:h-full md:w-[65%] pointer-events-auto z-0 flex items-center justify-center">
         <div className="absolute inset-0 w-full h-full">
-          <Canvas shadows camera={{ position: [0, 4, 10], fov: 45 }} dpr={[1, 2]}>
-            <Environment preset="city" />
-
+          <Canvas shadows camera={{ position: [0, 4, 10], fov: 45 }} dpr={dpr} frameloop={onScreen && tabVisible ? "always" : "never"}>
             <ambientLight intensity={0.02} />
-            <directionalLight position={[8, 5, 5]} intensity={1.5} color="#ffffff" castShadow shadow-mapSize={[2048, 2048]} />
+            <directionalLight position={[8, 5, 5]} intensity={1.5} color="#ffffff" castShadow shadow-mapSize={[1024, 1024]} />
             <directionalLight position={[-5, -3, -5]} intensity={0.15} color="#4a90e2" />
 
             <OrbitControls enableZoom={false} enablePan={false} autoRotate={false} />

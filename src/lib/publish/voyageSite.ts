@@ -9,6 +9,14 @@ import {
   type VoyageMood,
 } from "@/lib/voyage";
 import { VOYAGE_CSS } from "@/lib/voyageCss";
+import {
+  CHAPTER_LAYOUT_CSS,
+  CHAPTER_LAYOUT_FN,
+  CHAPTER_THEMES,
+  chapterLayoutHtml,
+  chapterLists,
+} from "@/lib/chapterLayout";
+import { chapterImageHtml } from "@/components/templates/storyMedia";
 import { NARRATION_DOCK_CSS, NARRATION_DOCK_JS, narrationDockMarkup } from "@/lib/narrationDock";
 import { VOYAGE_MUSIC_JS } from "@/lib/voyageMusic";
 
@@ -65,7 +73,7 @@ function avatarMarkup(chunk: Chunk, index: number, avatars: Avatar[]): string {
     }
     return `<video src="${bundlePath(url)}" muted loop playsinline preload="metadata"></video>`;
   }
-  return `<img src="${bundlePath(getAvatarImage(avatar, chunk.emotion))}" alt="" />`;
+  return `<img src="${bundlePath(getAvatarImage(avatar, chunk.emotion))}" alt="" decoding="async" />`;
 }
 
 const GATE_CSS = `
@@ -85,6 +93,7 @@ body{margin:0;background:#05030c;}
  *  verbatim in a template literal. */
 const VOYAGE_INIT_JS = `
 gsap.registerPlugin(ScrollTrigger);
+ScrollTrigger.config({ ignoreMobileResize: true });
 (function () {
   var D = JSON.parse(document.getElementById('vg-data').textContent);
   var total = D.chunks.length;
@@ -110,6 +119,7 @@ gsap.registerPlugin(ScrollTrigger);
   var busy = false;
   var viewChangedAt = 0;
   var motion = null;          // gsap.context for the current chunk page
+  var layoutCleanup = null;   // cleanup of the chapter layout on the current chunk page
   var narrationTimer = 0;
   var narrationEnabled = false;
   var narrationPaused = false;
@@ -139,7 +149,7 @@ gsap.registerPlugin(ScrollTrigger);
     sky.dataset.i = i;
     if (chunk.hue) sky.style.filter = 'hue-rotate(' + chunk.hue + 'deg)';
     var layers = p.sky.map(function (l, j) {
-      return '<img src="' + esc(l.src) + '" alt=""' + (j === 0 ? ' class="vg-sky-twinkle"' : '') +
+      return '<img src="' + esc(l.src) + '" alt="" decoding="async"' + (j === 0 ? ' class="vg-sky-twinkle"' : '') +
         (l.depth !== undefined ? ' data-parallax="' + l.depth + '"' : '') +
         ' style="opacity:' + l.opacity + (l.rotate180 ? ';transform:rotate(180deg)' : '') + '" />';
     }).join('');
@@ -203,7 +213,7 @@ gsap.registerPlugin(ScrollTrigger);
         n.className = 'vg-planet';
         n.dataset.i = i;
         n.setAttribute('aria-hidden', 'true');
-        n.innerHTML = '<img src="' + esc(palette(i).wheelPlanet) + '" alt="" style="--r:' + D.chunks[i].wheel + 'deg" />';
+        n.innerHTML = '<img src="' + esc(palette(i).wheelPlanet) + '" alt="" decoding="async" style="--r:' + D.chunks[i].wheel + 'deg" />';
         fg.insertBefore(n, q('.vg-select-card', fg));
         void n.offsetWidth;
       }
@@ -242,11 +252,6 @@ gsap.registerPlugin(ScrollTrigger);
   }
 
   // ------------------------------------------------------------ chunk view
-  function cardHtml(cls, tab, mirror, inner) {
-    return '<div class="vg-card' + (mirror ? ' mirror' : '') + ' ' + cls + '"><div class="vg-card-edge"></div>' +
-      '<h2 class="vg-card-tab"><span>' + esc(tab) + '</span></h2><div class="vg-card-body">' + inner + '</div></div>';
-  }
-
   function buildChunk() {
     var c = D.chunks[active];
     var p = palette(active);
@@ -258,27 +263,19 @@ gsap.registerPlugin(ScrollTrigger);
     art.setAttribute('aria-hidden', 'true');
     art.innerHTML = '<div class="vg-tagline"><h2>' + tagline + '</h2></div>' + p.art.map(function (l) {
       var s = l.scrub;
-      return '<div class="vg-art-layer vg-art-' + l.key + '" data-scrub="' + [s.y, s.x || 0, s.rotate || 0, s.zoom || 1].join(',') + '"><img src="' + esc(l.src) + '" alt="" /></div>';
+      return '<div class="vg-art-layer vg-art-' + l.key + '" data-scrub="' + [s.y, s.x || 0, s.rotate || 0, s.zoom || 1].join(',') + '"><img src="' + esc(l.src) + '" alt="" decoding="async" /></div>';
     }).join('');
 
-    var words = c.text.split(/\\s+/).filter(Boolean).map(function (w) { return '<span class="vg-word">' + esc(w) + '</span>'; }).join(' ');
     var more = active + 1 < total;
-    var keyPoint =
-      (c.quote ? '<blockquote class="vg-quote"><p>' + esc(c.quote) + '</p></blockquote>' : '') +
-      (c.bullets.length ? '<ul class="vg-points">' + c.bullets.map(function (b) { return '<li>' + esc(b) + '</li>'; }).join('') + '</ul>' : '') +
-      '<p class="vg-upnext">' + (more ? '<span class="k">Up next</span><span>' + esc(D.chunks[active + 1].full) + '</span>' : '<span class="k">Final chapter</span>') + '</p>';
-
     var page = document.createElement('div');
     page.className = 'vg-page';
     page.setAttribute('data-vg-fg', '');
     page.innerHTML =
       '<section class="vg-hero"><div class="vg-stage"><div class="vg-hero-row"><span>' + esc(c.label) + '</span><span>' + esc(c.dur) + '</span></div>' +
       '<h1 class="vg-hero-title" style="font-size:' + c.titleSize + '">' + esc(c.giant) + '</h1>' +
-      (c.avatar ? '<div class="vg-video">' + c.avatar + '</div>' : '') + '</div></section>' +
+      '</div></section>' +
       '<div class="vg-gap"></div>' +
-      '<section class="vg-info"><div class="vg-cards">' +
-      cardHtml('vg-card-1', 'Chapter ' + pad2(active + 1), false, '<h3>' + esc(c.full) + '</h3><p class="vg-text"' + (c.audio ? ' data-audio=""' : '') + '>' + words + '</p>') +
-      cardHtml('vg-card-2', 'Key point', true, keyPoint) + '</div></section>' +
+      '<section class="vg-info">' + c.layout + '</section>' +
       '<section class="vg-end"><p>' + (more ? 'Up next: ' + esc(D.chunks[active + 1].full) : 'That was the last chapter.') + '</p>' +
       '<button type="button" class="vg-btn vg-next" id="vg-next-cta"><span class="vg-next-bar"></span><span style="position:relative">' + (more ? 'Next chapter' : 'All chapters') + '</span></button></section>';
 
@@ -287,6 +284,11 @@ gsap.registerPlugin(ScrollTrigger);
     q('#vg-next-cta', page).addEventListener('click', function () {
       if (more) go('chunk', active + 1); else go('select', active);
     });
+    var pill = q('.cl-pill', page);
+    if (pill) pill.addEventListener('click', function () {
+      if (more) go('chunk', active + 1); else go('select', active);
+    });
+    layoutCleanup = initChapterLayout(page);
     bindChunkMotion(page);
   }
 
@@ -295,7 +297,6 @@ gsap.registerPlugin(ScrollTrigger);
       var scrub = { trigger: page, scrub: true };
       function st(extra) { return { trigger: scrub.trigger, scrub: true, start: extra.start, end: extra.end }; }
       gsap.to('.vg-hero-title', { yPercent: -30, ease: 'none', scrollTrigger: st({ start: 'top top', end: '+=100%' }) });
-      gsap.to('.vg-video', { yPercent: -55, ease: 'none', scrollTrigger: st({ start: 'top top', end: '+=100%' }) });
       gsap.fromTo('.vg-tagline .vg-mask > span', { yPercent: 120 }, {
         yPercent: 0, ease: 'none', stagger: 0.1,
         scrollTrigger: { trigger: '.vg-gap', start: 'top 70%', end: 'center center', scrub: true }
@@ -305,8 +306,6 @@ gsap.registerPlugin(ScrollTrigger);
         var v = (el.dataset.scrub || '0').split(',').map(Number);
         gsap.to(el, { yPercent: v[0] || 0, xPercent: v[1] || 0, rotate: v[2] || 0, scale: v[3] || 1, ease: 'none', scrollTrigger: st({ start: 'top top', end: 'bottom bottom' }) });
       });
-      gsap.fromTo('.vg-card-1', { yPercent: 8, opacity: 0 }, { yPercent: 0, opacity: 1, ease: 'none', scrollTrigger: { trigger: '.vg-info', start: 'top 80%', end: 'top 30%', scrub: true } });
-      gsap.fromTo('.vg-card-2', { yPercent: 30, opacity: 0 }, { yPercent: 0, opacity: 1, ease: 'none', scrollTrigger: { trigger: '.vg-info', start: 'top 80%', end: 'top 15%', scrub: true } });
       ScrollTrigger.create({
         trigger: page, start: 'top top', end: 'bottom bottom',
         onUpdate: function (self) { setFill((active + self.progress) / total); }
@@ -328,12 +327,18 @@ gsap.registerPlugin(ScrollTrigger);
     var running = 0;
     weights.forEach(function (w) { running += w; cumulative.push(running); });
     var totalWeight = running || 1;
+    var shown = -2;
     highlightHandler = function () {
       if (!audio.duration) return;
       var target = (audio.currentTime / audio.duration) * totalWeight;
       var idx = cumulative.findIndex(function (w) { return w >= target; });
       if (idx === -1) idx = words.length - 1;
-      words.forEach(function (w, i) { w.classList.toggle('on', i <= idx); });
+      if (idx === shown) return;
+      var k;
+      if (shown === -2) { for (k = 0; k < words.length; k++) words[k].classList.toggle('on', k <= idx); }
+      else if (idx > shown) { for (k = shown + 1; k <= idx; k++) words[k].classList.add('on'); }
+      else { for (k = idx + 1; k <= shown; k++) words[k].classList.remove('on'); }
+      shown = idx;
     };
     audio.addEventListener('timeupdate', highlightHandler);
   }
@@ -349,7 +354,7 @@ gsap.registerPlugin(ScrollTrigger);
   function startChunkNarration() {
     stopHighlight();
     var c = D.chunks[active];
-    var video = q('.vg-video video', viewHost);
+    var video = q('.cl-fig video', viewHost);
     if (video) { video.currentTime = 0; video.play().catch(function () {}); }
     if (!c.audio) return;
     if (audio.getAttribute('src') !== c.audio) audio.src = c.audio;
@@ -362,7 +367,7 @@ gsap.registerPlugin(ScrollTrigger);
     window.clearTimeout(narrationTimer);
     stopHighlight();
     audio.pause();
-    var video = q('.vg-video video', viewHost);
+    var video = q('.cl-fig video', viewHost);
     if (video) video.pause();
   }
 
@@ -380,6 +385,7 @@ gsap.registerPlugin(ScrollTrigger);
   function teardown() {
     stopNarration();
     if (motion) { motion.revert(); motion = null; }
+    if (layoutCleanup) { layoutCleanup(); layoutCleanup = null; }
     while (viewHost.firstChild) viewHost.removeChild(viewHost.firstChild);
     root.style.setProperty('--vg-down', '0');
   }
@@ -395,7 +401,6 @@ gsap.registerPlugin(ScrollTrigger);
     });
     if (view === 'chunk') {
       gsap.from('.vg-art', { opacity: 0, scale: 1.08, duration: 1.2, ease: 'power3.out', clearProps: 'all' });
-      gsap.from('.vg-video', { filter: 'blur(40px)', scale: 0.6, duration: 0.9, ease: 'power4.out', clearProps: 'filter,scale' });
       gsap.from('.vg-hero-row > span', { yPercent: 120, duration: 0.8, delay: 0.2, ease: 'power4.out' });
     }
   }
@@ -537,7 +542,7 @@ gsap.registerPlugin(ScrollTrigger);
         var cx = window.innerWidth / 2, cy = window.innerHeight / 2;
         qa('.vg-sky.on [data-parallax], [data-vg-fg] [data-parallax]').forEach(function (el) {
           var depth = parseFloat(el.dataset.parallax || '1') || 1;
-          gsap.to(el, { x: ((e.clientX - cx) / cx) * -20 * depth, y: ((e.clientY - cy) / cy) * -30 * depth, ease: 'power2.out', duration: 4 });
+          gsap.to(el, { x: ((e.clientX - cx) / cx) * -20 * depth, y: ((e.clientY - cy) / cy) * -30 * depth, ease: 'power2.out', duration: 4, overwrite: 'auto' });
         });
       });
     }, { passive: true });
@@ -638,11 +643,28 @@ export function renderVoyage(
       full: dest.fullTitle,
       dur: dest.duration,
       mood: dest.mood,
-      quote: dest.pullQuote,
-      bullets: dest.bullets,
-      text: chunk.narrativeText,
       audio: chunkAudioUrl(supabaseUrl, project.id, chunk),
-      avatar: avatarMarkup(chunk, index, avatars),
+      layout: chapterLayoutHtml({
+        theme: CHAPTER_THEMES.voyage,
+        index,
+        total,
+        eyebrow: `Chapter ${String(index + 1).padStart(2, "0")}`,
+        title: dest.fullTitle,
+        textHtml: `<p class="vg-text"${chunk.audioUrl ? ' data-audio=""' : ""}>${chunk.narrativeText
+          .split(/\s+/)
+          .filter(Boolean)
+          .map((w) => `<span class="vg-word">${escapeHtml(w)}</span>`)
+          .join(" ")}</p>`,
+        media: [
+          ...(chunk.imageUrl ? [{ kind: "scene" as const, html: chapterImageHtml(chunk.imageUrl) }] : []),
+          ...(avatarMarkup(chunk, index, avatars) ? [{ kind: "avatar" as const, html: avatarMarkup(chunk, index, avatars) }] : []),
+        ],
+        lists: chapterLists(
+          project.chunks.map((c) => ({ title: c.title, text: c.narrativeText })),
+          index
+        ),
+        nextLabel: index + 1 < total ? "Next chapter" : "All chapters",
+      }),
     };
   });
 
@@ -702,12 +724,13 @@ export function renderVoyage(
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
 <link rel="stylesheet" href="${FONTS_HREF}" />
-<style>${VOYAGE_CSS}${NARRATION_DOCK_CSS}${GATE_CSS}</style>
+<style>${VOYAGE_CSS}${CHAPTER_LAYOUT_CSS}${NARRATION_DOCK_CSS}${GATE_CSS}</style>
 </head>
 <body>
 ${body}
 <script src="${GSAP_CDN}"></script>
 <script src="${SCROLLTRIGGER_CDN}"></script>
+<script>var initChapterLayout = ${CHAPTER_LAYOUT_FN};</script>
 <script>${VOYAGE_MUSIC_JS}${NARRATION_DOCK_JS}${VOYAGE_INIT_JS}</script>
 </body>
 </html>`;

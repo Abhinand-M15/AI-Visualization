@@ -4,6 +4,7 @@ import path from "node:path";
 import { getSupabase } from "@/lib/db";
 import {
   buildPayload,
+  isMissingSchemaError,
   PROJECT_SELECT_COLUMNS,
   projectListColumns,
   rowToProject,
@@ -17,6 +18,8 @@ import { applyCaseStudySectionEdits, type CaseStudySectionEdit } from "@/lib/cas
 import { mergeChunks } from "@/lib/chunkMerge";
 import { requireUser, unauthorizedResponse } from "@/lib/auth/session";
 import { logActivity } from "@/lib/activity";
+import { pathBelongsTo } from "@/app/api/logos/server";
+import { applyChapterImages, loadChapterImageRows, loadProjectDomainFields, logoUrlFor } from "@/lib/sceneImages";
 
 const AUDIO_BUCKET = "chunk-audio";
 const VIDEO_BUCKET = "chunk-video";
@@ -36,7 +39,20 @@ export async function GET(_request: Request, context: { params: Promise<{ id: st
     if (!data) {
       return NextResponse.json({ error: "Project not found." }, { status: 404 });
     }
-    return NextResponse.json({ project: rowToProjectSummary(data as unknown as ProjectSummaryRow) });
+    const project = rowToProjectSummary(data as unknown as ProjectSummaryRow);
+    // Domain, logo and scene images (migration 003). Each lookup yields nothing when
+    // not migrated, so a project without any of it is returned exactly as before.
+    const [fields, imageRows] = await Promise.all([loadProjectDomainFields(id), loadChapterImageRows(id)]);
+    const logoUrl = logoUrlFor(fields.logoPath);
+    return NextResponse.json({
+      project: {
+        ...project,
+        chunks: applyChapterImages(project.chunks, imageRows),
+        ...(fields.domainId ? { domainId: fields.domainId } : {}),
+        ...(fields.domainAvatarId ? { domainAvatarId: fields.domainAvatarId } : {}),
+        ...(logoUrl ? { logoUrl } : {}),
+      },
+    });
   } catch (error) {
     const unauthorized = unauthorizedResponse(error);
     if (unauthorized) return unauthorized;
@@ -58,6 +74,8 @@ interface UpdateBody {
   chunks?: unknown[];
   title?: string;
   sectionEdits?: CaseStudySectionEdit[];
+  /** Company logo: a path in the company-logos bucket, or null to remove it. */
+  logoPath?: string | null;
 }
 
 function parseUpdateBody(value: unknown): { ok: true; body: UpdateBody } | { ok: false; error: string } {
@@ -99,8 +117,19 @@ function parseUpdateBody(value: unknown): { ok: true; body: UpdateBody } | { ok:
     }
     body.sectionEdits = edits;
   }
-  if (body.chunks === undefined && body.title === undefined && body.sectionEdits === undefined) {
-    return { ok: false, error: "Body must include 'chunks', 'title' or 'sectionEdits'." };
+  if (raw.logoPath !== undefined) {
+    if (raw.logoPath !== null && typeof raw.logoPath !== "string") {
+      return { ok: false, error: "'logoPath' must be a string or null." };
+    }
+    body.logoPath = raw.logoPath;
+  }
+  if (
+    body.chunks === undefined &&
+    body.title === undefined &&
+    body.sectionEdits === undefined &&
+    body.logoPath === undefined
+  ) {
+    return { ok: false, error: "Body must include 'chunks', 'title', 'sectionEdits' or 'logoPath'." };
   }
   return { ok: true, body };
 }
@@ -115,6 +144,11 @@ export async function PATCH(request: Request, context: { params: Promise<{ id: s
       return NextResponse.json({ error: parsed.error }, { status: 400 });
     }
     const body = parsed.body;
+
+    // The logo may only point into the caller's own folder of the logos bucket.
+    if (typeof body.logoPath === "string" && !pathBelongsTo(user, body.logoPath)) {
+      return NextResponse.json({ error: "Invalid 'logoPath'." }, { status: 400 });
+    }
 
     const supabase = getSupabase();
     let fetchQuery = supabase.from("projects").select(PROJECT_SELECT_COLUMNS).eq("id", id);
@@ -190,6 +224,22 @@ export async function PATCH(request: Request, context: { params: Promise<{ id: s
 
     if (updateError) throw new Error(updateError.message);
 
+    // Company logo (column exists once migration 003 is applied).
+    let logoPathNow: string | undefined;
+    if (body.logoPath !== undefined) {
+      let logoQuery = supabase.from("projects").update({ logo_path: body.logoPath }).eq("id", id);
+      if (user) logoQuery = logoQuery.eq("owner_id", user.id);
+      const { error: logoError } = await logoQuery;
+      if (logoError) {
+        if (isMissingSchemaError(logoError)) {
+          return NextResponse.json({ error: "Company logos aren't available yet." }, { status: 503 });
+        }
+        throw new Error(logoError.message);
+      }
+      logoPathNow = body.logoPath ?? undefined;
+      await logActivity(user, id, "logo.updated", { removed: body.logoPath === null });
+    }
+
     // Best-effort: remove narration files of deleted chapters.
     const orphaned = (merged?.removed ?? []).filter((chunk) => chunk.audioUrl).map((chunk) => `${id}/${chunk.id}.mp3`);
     if (orphaned.length > 0) {
@@ -205,7 +255,10 @@ export async function PATCH(request: Request, context: { params: Promise<{ id: s
       sectionsEdited,
       titleChanged,
     });
-    return NextResponse.json({ project: rowToProjectSummary(updated as unknown as ProjectSummaryRow) });
+    return NextResponse.json({
+      project: rowToProjectSummary(updated as unknown as ProjectSummaryRow),
+      ...(body.logoPath !== undefined ? { logoUrl: logoUrlFor(logoPathNow) ?? null } : {}),
+    });
   } catch (error) {
     const unauthorized = unauthorizedResponse(error);
     if (unauthorized) return unauthorized;

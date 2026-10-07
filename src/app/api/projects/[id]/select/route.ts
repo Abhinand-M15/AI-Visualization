@@ -11,10 +11,24 @@ import {
   type ProjectSummaryRow,
 } from "@/lib/projects";
 import { AVATARS } from "@/lib/avatars";
-import { getTemplateById } from "@/lib/templates";
+import { TEMPLATE_UNAVAILABLE_MESSAGE, isTemplateAvailable } from "@/lib/templates";
 import type { CaseStudyBinding, Chunk } from "@/lib/types";
 import { requireUser, unauthorizedResponse } from "@/lib/auth/session";
 import { logActivity } from "@/lib/activity";
+import { DOMAIN_AVATAR_PREFIX } from "@/lib/domainAvatars";
+import { isNotMigratedError } from "@/lib/sceneImages";
+
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** True for a static avatar id or a well-formed 'domain:<uuid>' id (whether it exists is checked by the avatar routes). */
+function isSelectableAvatarId(avatarId: unknown): boolean {
+  if (typeof avatarId !== "string") return false;
+  if (avatarId.startsWith(DOMAIN_AVATAR_PREFIX)) return UUID_PATTERN.test(avatarId.slice(DOMAIN_AVATAR_PREFIX.length));
+  return AVATARS.some((avatar) => avatar.id === avatarId);
+}
+
+/** Set after the first "column domain_avatar_id is missing" error, so an unmigrated database isn't asked twice. */
+let domainAvatarColumnMissing = false;
 
 interface SelectBody {
   selectedAvatarIds?: string[];
@@ -33,12 +47,12 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
     if (
       body.selectedAvatarIds !== undefined &&
       (!Array.isArray(body.selectedAvatarIds) ||
-        !body.selectedAvatarIds.every((avatarId) => AVATARS.some((avatar) => avatar.id === avatarId)))
+        !body.selectedAvatarIds.every(isSelectableAvatarId))
     ) {
       return NextResponse.json({ error: "Unknown avatar." }, { status: 400 });
     }
-    if (body.selectedTemplateId !== undefined && !getTemplateById(String(body.selectedTemplateId))) {
-      return NextResponse.json({ error: "Unknown template." }, { status: 400 });
+    if (body.selectedTemplateId !== undefined && !isTemplateAvailable(String(body.selectedTemplateId))) {
+      return NextResponse.json({ error: TEMPLATE_UNAVAILABLE_MESSAGE }, { status: 400 });
     }
     if (
       body.selectedVoice !== undefined &&
@@ -59,6 +73,12 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
 
     const update: Record<string, unknown> = { updated_at: new Date().toISOString(), ...updatedByFields(user) };
     if (body.selectedAvatarIds) update.selected_avatar_ids = body.selectedAvatarIds;
+    // The chosen domain avatar ('domain:<id>') is also stored on its own column (null when none is chosen).
+    const withDomainAvatar = body.selectedAvatarIds !== undefined && !domainAvatarColumnMissing;
+    if (withDomainAvatar) {
+      const chosen = body.selectedAvatarIds?.find((avatarId) => avatarId.startsWith(DOMAIN_AVATAR_PREFIX));
+      update.domain_avatar_id = chosen ? chosen.slice(DOMAIN_AVATAR_PREFIX.length) : null;
+    }
     if (body.selectedTemplateId) update.selected_template_id = body.selectedTemplateId;
     if (body.selectedVoice) update.selected_voice = body.selectedVoice;
 
@@ -80,10 +100,20 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
     }
     update.payload = buildPayload(project, { chunks, caseStudyBinding: binding });
 
-    let query = supabase.from("projects").update(update).eq("id", id);
-    if (user) query = query.eq("owner_id", user.id);
-    const { data, error } = await query.select(projectListColumns(Boolean(user))).maybeSingle();
+    const runUpdate = (values: Record<string, unknown>) => {
+      let query = supabase.from("projects").update(values).eq("id", id);
+      if (user) query = query.eq("owner_id", user.id);
+      return query.select(projectListColumns(Boolean(user))).maybeSingle();
+    };
+    let { data, error } = await runUpdate(update);
+    if (error && withDomainAvatar && isNotMigratedError(error)) {
+      // Migration 003 not applied: save everything else exactly as before.
+      domainAvatarColumnMissing = true;
+      delete update.domain_avatar_id;
+      ({ data, error } = await runUpdate(update));
+    }
 
+    if (error?.code === "23503") return NextResponse.json({ error: "Unknown avatar." }, { status: 400 });
     if (error) throw new Error(error.message);
     if (!data) {
       return NextResponse.json({ error: "Project not found." }, { status: 404 });

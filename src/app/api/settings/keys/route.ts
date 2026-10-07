@@ -5,8 +5,8 @@ import { logActivity } from "@/lib/activity";
 
 /**
  * GET    -> { authEnabled, keys: KeyStatus[] }   (never the key itself)
- * PUT    { provider: 'gemini', key }             -> { key: KeyStatus }
- * DELETE ?provider=gemini                        -> { ok: true }
+ * PUT    { provider: 'gemini' | 'openai', key }           -> { key: KeyStatus }
+ * DELETE ?provider=gemini|openai                     -> { ok: true }
  *
  * With accounts off there is nobody to store a key for: GET reports
  * authEnabled:false and the server keeps using GEMINI_API_KEY from the env.

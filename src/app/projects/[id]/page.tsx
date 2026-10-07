@@ -4,7 +4,8 @@ import Link from "next/link";
 import { use, useCallback, useEffect, useRef, useState } from "react";
 import { documentTypeLabel, type Chunk, type Project } from "@/lib/types";
 import { AVATARS } from "@/lib/avatars";
-import { TEMPLATES } from "@/lib/templates";
+import { TEMPLATE_UNAVAILABLE_NOTICE } from "@/lib/templates";
+import { useAvailableTemplates } from "@/lib/useAvailableTemplates";
 import { SpaceBackdrop } from "@/components/SpaceBackdrop";
 import { AudioPlayer } from "@/components/AudioPlayer";
 import { LoadingBar } from "@/components/LoadingBar";
@@ -22,6 +23,9 @@ import {
   type NarrationState,
 } from "@/lib/contentVersion";
 import { CASE_STUDY_TEMPLATE_CONTRACT } from "@/lib/agent/caseStudyTemplateContract";
+import DomainAvatarPicker from "@/components/DomainAvatarPicker";
+import SceneImagesPanel from "@/components/SceneImagesPanel";
+import ProjectLogoControl from "@/components/ProjectLogoControl";
 
 /** maxChars of a slot field from the case-study contract, when the contract defines one. */
 function contractMaxChars(slotId: string, field: string): number | undefined {
@@ -103,7 +107,11 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
   const [audioError, setAudioError] = useState<string | null>(null);
   const [audioProgress, setAudioProgress] = useState<{ completed: number; total: number } | null>(null);
   const [selectedAvatarIds, setSelectedAvatarIds] = useState<string[]>([]);
+  // Industry domain and company logo (both optional; present once migration 003 is applied).
+  const [domainId, setDomainId] = useState<string | null>(null);
+  const [logoUrl, setLogoUrl] = useState<string | undefined>(undefined);
   const [selectedTemplateId, setSelectedTemplateId] = useState<string>("");
+  const { templates: availableTemplates, isAvailable: isTemplateAvailable } = useAvailableTemplates();
   const [savingSelection, setSavingSelection] = useState(false);
   const [selectionError, setSelectionError] = useState<string | null>(null);
   const [publishDialogOpen, setPublishDialogOpen] = useState(false);
@@ -168,6 +176,8 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
         if (data.project.selectedVoice) setSelectedVoice(data.project.selectedVoice);
         if (data.project.selectedAvatarIds) setSelectedAvatarIds(data.project.selectedAvatarIds);
         if (data.project.selectedTemplateId) setSelectedTemplateId(data.project.selectedTemplateId);
+        setDomainId(data.project.domainId ?? null);
+        setLogoUrl(data.project.logoUrl ?? undefined);
       })
       .catch((err) => setError(err instanceof Error ? err.message : "Failed to load project."));
   }, [id, setProject]);
@@ -358,6 +368,24 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
       : [...selectedAvatarIds, avatarId];
     setSelectedAvatarIds(next);
     saveSelection({ avatarIds: next });
+  }
+
+  // One generated (domain) avatar at a time; the static avatars keep their own toggles.
+  function selectDomainAvatar(avatarId: string) {
+    const others = selectedAvatarIds.filter((existing) => !existing.startsWith("domain:"));
+    const next = selectedAvatarIds.includes(avatarId) ? others : [...others, avatarId];
+    setSelectedAvatarIds(next);
+    saveSelection({ avatarIds: next });
+  }
+
+  async function reloadAfterImages() {
+    try {
+      const res = await fetch(`/api/projects/${id}`);
+      const data = await res.json();
+      if (res.ok && data.project) applyServerProject(data.project);
+    } catch {
+      // The panel shows its own status; a missed refresh is harmless.
+    }
   }
 
   function selectTemplate(templateId: string) {
@@ -643,7 +671,10 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
   // renderStaticSite), never one of the generic chunk-based templates, so
   // they don't need a template selection to be publish-ready — just an
   // avatar and a generated layout (checked separately, in the Publish button).
-  const readyToPreview = selectedAvatarIds.length > 0 && (isCaseStudyProject || Boolean(selectedTemplateId));
+  // A stored template id that was since removed or hidden counts as "no template" (never a surprise look).
+  const templateGone = !isCaseStudyProject && Boolean(selectedTemplateId) && !isTemplateAvailable(selectedTemplateId);
+  const readyToPreview =
+    selectedAvatarIds.length > 0 && (isCaseStudyProject || (Boolean(selectedTemplateId) && !templateGone));
   const readyToPublish = readyToPreview && (!isCaseStudyProject || Boolean(project?.caseStudyBinding?.slots));
   const publishState = project ? getPublishState(project) : "draft";
   // Narration of what the published site plays, against the voice now selected.
@@ -681,6 +712,11 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
               {` · created ${formatDate(project.createdAt)}`}
               {project.publishedAt ? ` · last published ${formatDate(project.publishedAt)}` : ""}
             </p>
+            {templateGone && (
+              <p className="self-start rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900 dark:border-amber-400/30 dark:bg-amber-400/10 dark:text-amber-100">
+                {TEMPLATE_UNAVAILABLE_NOTICE}
+              </p>
+            )}
             {publishState === "changed" && (
               <div className="flex flex-col gap-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900 dark:border-amber-400/30 dark:bg-amber-400/10 dark:text-amber-100 sm:flex-row sm:items-center sm:justify-between">
                 <span>
@@ -812,11 +848,25 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
               })}
             </div>
 
+            {domainId && (
+              <DomainAvatarPicker
+                domainId={domainId}
+                value={selectedAvatarIds.find((existing) => existing.startsWith("domain:")) ?? null}
+                onSelect={selectDomainAvatar}
+              />
+            )}
+
+            {domainId && selectedAvatarIds.some((existing) => existing.startsWith("domain:")) && (
+              <SceneImagesPanel projectId={id} autoStart onChanged={() => void reloadAfterImages()} />
+            )}
+
+            <ProjectLogoControl projectId={id} logoUrl={logoUrl} onChanged={setLogoUrl} />
+
             <div className="mt-1">
               <label className="text-sm font-semibold text-neutral-800 dark:text-indigo-100">Template</label>
             </div>
             <div className="grid grid-cols-2 gap-2 xl:grid-cols-3">
-              {TEMPLATES.map((template) => {
+              {availableTemplates.map((template) => {
                 const active = selectedTemplateId === template.id;
                 return (
                   <button
@@ -837,11 +887,15 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
               })}
             </div>
 
+            {templateGone && (
+              <p className="text-xs font-medium text-amber-700 dark:text-amber-300">{TEMPLATE_UNAVAILABLE_NOTICE}</p>
+            )}
+
             {selectionError && <p className="text-xs text-red-600 dark:text-red-400">{selectionError}</p>}
 
             {!readyToPreview && (
               <p className="text-xs text-neutral-500 dark:text-indigo-200/60">
-                {selectedAvatarIds.length === 0 && !isCaseStudyProject && !selectedTemplateId
+                {selectedAvatarIds.length === 0 && !isCaseStudyProject && (!selectedTemplateId || templateGone)
                   ? "Select an avatar and a template to preview and publish the site."
                   : selectedAvatarIds.length === 0
                   ? "Select an avatar to preview and publish the site."

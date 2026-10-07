@@ -1,8 +1,79 @@
 import type { CaseStudyBinding, Chunk, DocumentType, Project, PublicationRecord } from "@/lib/types";
 import { contentFingerprint } from "@/lib/contentVersion";
+import { logoUrl as logoPublicUrl } from "@/lib/storageUrls";
 
 export const PROJECT_SELECT_COLUMNS =
   "id, title, document_type, source_file_name, payload, selected_voice, selected_avatar_ids, selected_template_id, status, published_url, created_at";
+
+/**
+ * Columns added by db/migrations/003_domains_images.sql. They are NOT part of
+ * PROJECT_SELECT_COLUMNS (selecting a missing column would break every read
+ * when the migration isn't applied); use selectWithDomainColumns() /
+ * saveProjectDomain() below, which fall back when they don't exist.
+ */
+export const PROJECT_DOMAIN_COLUMNS = "domain_id, domain_avatar_id, logo_path";
+
+/** PostgREST / Postgres errors meaning "that table or column isn't there (migration not applied)". */
+export function isMissingSchemaError(error: { code?: string | null; message?: string | null } | null | undefined): boolean {
+  if (!error) return false;
+  if (error.code && ["42P01", "42703", "PGRST204", "PGRST205"].includes(error.code)) return true;
+  const message = error.message ?? "";
+  return /(domain_id|domain_avatar_id|logo_path)/.test(message) && /(column|schema cache|does not exist)/i.test(message);
+}
+
+/**
+ * Runs `run` with the base columns plus the domain columns; if that fails
+ * because the migration isn't applied, runs it again with the base columns
+ * only. `run` receives the column list to pass to .select().
+ */
+export async function selectWithDomainColumns<R extends { error: { code?: string | null; message?: string | null } | null }>(
+  baseColumns: string,
+  run: (columns: string) => PromiseLike<R>
+): Promise<R> {
+  const result = await run(`${baseColumns}, ${PROJECT_DOMAIN_COLUMNS}`);
+  if (result.error && isMissingSchemaError(result.error)) return run(baseColumns);
+  return result;
+}
+
+/**
+ * Best-effort: stores domain_id / logo_path on a project. Writes nothing when
+ * neither value is present, and never throws or fails the caller (a missing
+ * column or any other error is only logged). Returns whether anything was saved.
+ */
+export async function saveProjectDomain(
+  supabase: {
+    from(table: string): {
+      update(values: Record<string, unknown>): {
+        eq(column: string, value: string): PromiseLike<{ error: { code?: string | null; message?: string | null } | null }>;
+      };
+    };
+  },
+  projectId: string,
+  fields: { domainId?: string | null; logoPath?: string | null }
+): Promise<boolean> {
+  const values: Record<string, unknown> = {};
+  if (fields.domainId) values.domain_id = fields.domainId;
+  if (fields.logoPath) values.logo_path = fields.logoPath;
+  if (Object.keys(values).length === 0) return false;
+  try {
+    let { error } = await supabase.from("projects").update(values).eq("id", projectId);
+    if (error && isMissingSchemaError(error) && values.domain_id && values.logo_path) {
+      // One of the two columns may exist without the other; try each on its own.
+      for (const key of Object.keys(values)) {
+        const single = await supabase.from("projects").update({ [key]: values[key] }).eq("id", projectId);
+        if (!single.error) error = null;
+      }
+    }
+    if (error) {
+      if (!isMissingSchemaError(error)) console.error("saving project domain/logo failed:", error.message);
+      return false;
+    }
+    return true;
+  } catch (error) {
+    console.error("saving project domain/logo failed:", error);
+    return false;
+  }
+}
 
 export interface ProjectPayload {
   chunks: Chunk[];
@@ -48,6 +119,10 @@ export interface ProjectRow {
   status: Project["publishStatus"];
   published_url: string | null;
   created_at: string;
+  /** Only present when the row was selected with PROJECT_DOMAIN_COLUMNS (migration 003). */
+  domain_id?: string | null;
+  domain_avatar_id?: string | null;
+  logo_path?: string | null;
 }
 
 /**
@@ -112,5 +187,17 @@ export function rowToProject(row: ProjectRow): Project {
     createdAt: row.created_at,
     caseStudyBinding: row.payload.caseStudyBinding ?? undefined,
     publication: row.payload.publication ?? undefined,
+    ...(row.domain_id ? { domainId: row.domain_id } : {}),
+    ...(row.domain_avatar_id ? { domainAvatarId: row.domain_avatar_id } : {}),
+    ...(row.logo_path ? logoUrlField(row.logo_path) : {}),
   };
+}
+
+/** { logoUrl } for a stored path; nothing when SUPABASE_URL isn't available (e.g. in the browser). */
+function logoUrlField(path: string): { logoUrl?: string } {
+  try {
+    return { logoUrl: logoPublicUrl(path) };
+  } catch {
+    return {};
+  }
 }

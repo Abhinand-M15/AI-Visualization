@@ -6,7 +6,8 @@ import { SpaceBackdrop } from "@/components/SpaceBackdrop";
 import { PublishDialog } from "@/components/PublishDialog";
 import { PublishStateBadge } from "@/components/PublishStateBadge";
 import { formatDate, type ProjectSummary } from "@/lib/projects";
-import { getTemplateById } from "@/lib/templates";
+import { TEMPLATE_UNAVAILABLE_NOTICE, getTemplateById } from "@/lib/templates";
+import { useAvailableTemplates } from "@/lib/useAvailableTemplates";
 import { documentTypeLabel, type Project } from "@/lib/types";
 import {
   PUBLISH_STATES,
@@ -51,6 +52,7 @@ export default function HomePage() {
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [publishingProjectId, setPublishingProjectId] = useState<string | null>(null);
+  const { isAvailable: isTemplateAvailable } = useAvailableTemplates();
 
   useEffect(() => {
     fetch("/api/projects")
@@ -266,6 +268,11 @@ export default function HomePage() {
                     {documentTypeLabel(project.documentType)} · {templateLabel(project)} ·{" "}
                     {plural(project.chunks.length, "chapter")}
                   </p>
+                  {project.documentType !== "case-study" &&
+                    project.selectedTemplateId &&
+                    !isTemplateAvailable(project.selectedTemplateId) && (
+                      <p className="mt-1 text-xs font-medium text-amber-700 dark:text-amber-300">{TEMPLATE_UNAVAILABLE_NOTICE}</p>
+                    )}
                   <p className="mt-0.5 text-xs text-neutral-500 dark:text-indigo-200/60">
                     Created {formatDate(project.createdAt)}
                     {" · "}

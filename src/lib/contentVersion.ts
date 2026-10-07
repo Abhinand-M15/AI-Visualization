@@ -59,6 +59,9 @@ export function contentFingerprint(project: Project): string {
     template: project.selectedTemplateId,
     avatars: project.selectedAvatarIds ?? [],
     voice: project.selectedVoice,
+    // Company logo: its public URL, only when set (stableStringify drops undefined,
+    // so a project without a logo hashes exactly as before this field existed).
+    logo: project.logoUrl,
     content: usesBinding
       ? {
           slots: binding?.slots,
@@ -75,6 +78,11 @@ export function contentFingerprint(project: Project): string {
             emotion: chunk.emotion,
             audioUrl: chunk.audioUrl,
             audioVoice: chunk.audioVoice,
+            // Scene image: the public URL of a ready image (it carries ?v=<updated_at>, so a
+            // regenerated image changes it). Absent for chapters without one, which keeps
+            // those hashes unchanged. imageStatus is deliberately not fingerprinted: only
+            // ready images reach the published site.
+            imageUrl: chunk.imageUrl,
           })),
         },
   };

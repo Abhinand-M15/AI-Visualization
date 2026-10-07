@@ -18,14 +18,21 @@ import {
 import { VOYAGE_CSS } from "@/lib/voyageCss";
 import { createVoyageMusic, type VoyageMusic } from "@/lib/voyageMusic";
 import { AvatarDisplay } from "./AvatarDisplay";
+import { ChapterLayout, SceneImg, type ChapterMediaItem } from "./ChapterLayout";
+import { CHAPTER_THEMES, chapterLists } from "@/lib/chapterLayout";
+import { StoryLogo } from "./StoryLogo";
 import { avatarForIndex, type TemplateProps } from "./types";
 
-if (typeof window !== "undefined") gsap.registerPlugin(ScrollTrigger);
+if (typeof window !== "undefined") {
+  gsap.registerPlugin(ScrollTrigger);
+  ScrollTrigger.config({ ignoreMobileResize: true });
+}
 
 const display = Unbounded({ subsets: ["latin"], variable: "--vg-display", display: "swap" });
 const body = Manrope({ subsets: ["latin"], variable: "--vg-body", display: "swap" });
 
 type View = "select" | "chunk";
+
 
 const WHEEL_THROTTLE_MS = 800;
 const WHEEL_MIN_DELTA = 10;
@@ -45,7 +52,7 @@ function parseHash(total: number): { view: View; index: number } {
   return index >= 0 && index < total ? { view: "chunk", index } : { view: "select", index: 0 };
 }
 
-export default function VoyageTemplate({ title, chunks, avatars }: TemplateProps) {
+export default function VoyageTemplate({ title, chunks, avatars, logoUrl }: TemplateProps) {
   const total = chunks.length;
   const rootRef = useRef<HTMLDivElement>(null);
   const navFillRef = useRef<HTMLDivElement>(null);
@@ -181,7 +188,6 @@ export default function VoyageTemplate({ title, chunks, avatars }: TemplateProps
       );
       if (view === "chunk") {
         gsap.from(".vg-art", { opacity: 0, scale: 1.08, duration: 1.2, ease: "power3.out", clearProps: "all" });
-        gsap.from(".vg-video", { filter: "blur(40px)", scale: 0.6, duration: 0.9, ease: "power4.out", clearProps: "filter,scale" });
         gsap.from(".vg-hero-row > span", { yPercent: 120, duration: 0.8, delay: 0.2, ease: "power4.out" });
       }
     }, root);
@@ -201,7 +207,6 @@ export default function VoyageTemplate({ title, chunks, avatars }: TemplateProps
       const scrub = { trigger: page, scrub: true } as const;
 
       gsap.to(".vg-hero-title", { yPercent: -30, ease: "none", scrollTrigger: { ...scrub, start: "top top", end: "+=100%" } });
-      gsap.to(".vg-video", { yPercent: -55, ease: "none", scrollTrigger: { ...scrub, start: "top top", end: "+=100%" } });
 
       gsap.fromTo(
         ".vg-tagline .vg-mask > span",
@@ -223,17 +228,6 @@ export default function VoyageTemplate({ title, chunks, avatars }: TemplateProps
         const [y = 0, x = 0, rotate = 0, zoom = 1] = (el.dataset.scrub ?? "0").split(",").map(Number);
         gsap.to(el, { yPercent: y, xPercent: x, rotate, scale: zoom, ease: "none", scrollTrigger: { ...scrub, start: "top top", end: "bottom bottom" } });
       });
-
-      gsap.fromTo(
-        ".vg-card-1",
-        { yPercent: 8, opacity: 0 },
-        { yPercent: 0, opacity: 1, ease: "none", scrollTrigger: { trigger: ".vg-info", start: "top 80%", end: "top 30%", scrub: true } },
-      );
-      gsap.fromTo(
-        ".vg-card-2",
-        { yPercent: 30, opacity: 0 },
-        { yPercent: 0, opacity: 1, ease: "none", scrollTrigger: { trigger: ".vg-info", start: "top 80%", end: "top 15%", scrub: true } },
-      );
 
       ScrollTrigger.create({
         trigger: page,
@@ -367,6 +361,7 @@ export default function VoyageTemplate({ title, chunks, avatars }: TemplateProps
             y: ((event.clientY - cy) / cy) * -30 * depth,
             ease: "power2.out",
             duration: 4,
+            overwrite: "auto",
           });
         });
       });
@@ -392,12 +387,19 @@ export default function VoyageTemplate({ title, chunks, avatars }: TemplateProps
       return acc;
     }, []);
     const totalWeight = cumulative[cumulative.length - 1] ?? 1;
+    // Only the words between the previous and the new position are touched
+    // (the first event after a start repaints them all).
+    let shown = -2;
     const onTimeUpdate = () => {
       if (!audio.duration) return;
       const target = (audio.currentTime / audio.duration) * totalWeight;
       let index = cumulative.findIndex((w) => w >= target);
       if (index === -1) index = words.length - 1;
-      words.forEach((word, i) => word.classList.toggle("on", i <= index));
+      if (index === shown) return;
+      if (shown === -2) words.forEach((word, i) => word.classList.toggle("on", i <= index));
+      else if (index > shown) for (let i = shown + 1; i <= index; i++) words[i].classList.add("on");
+      else for (let i = index + 1; i <= shown; i++) words[i].classList.remove("on");
+      shown = index;
     };
     // Music sits lower while the narrator speaks.
     const duck = () => music.current?.duck(true);
@@ -438,6 +440,14 @@ export default function VoyageTemplate({ title, chunks, avatars }: TemplateProps
   const inChunk = view === "chunk";
   const avatar = avatarForIndex(active, avatars);
   const chunk = chunks[active];
+  const media: ChapterMediaItem[] = [];
+  if (chunk.imageUrl) media.push({ kind: "scene", node: <SceneImg src={chunk.imageUrl} /> });
+  if (avatar) {
+    media.push({
+      kind: "avatar",
+      node: <AvatarDisplay avatar={avatar} emotion={chunk.emotion} className="h-full w-full object-contain" />,
+    });
+  }
   const mounted = mountedIndices(active, total);
   const rootStyle = { "--vg-accent": current.palette.accent } as CSSProperties;
 
@@ -445,6 +455,7 @@ export default function VoyageTemplate({ title, chunks, avatars }: TemplateProps
     <div ref={rootRef} className={`vg-root ${display.variable} ${body.variable}`} style={rootStyle}>
       <style>{VOYAGE_CSS}</style>
       <NarrationMasterControl theme={NARRATION_DOCK_THEMES.voyage} />
+      <StoryLogo logoUrl={logoUrl} />
       <button
         type="button"
         onClick={() => {
@@ -484,6 +495,7 @@ export default function VoyageTemplate({ title, chunks, avatars }: TemplateProps
                     key={j}
                     src={layer.src}
                     alt=""
+                    decoding="async"
                     className={j === 0 ? "vg-sky-twinkle" : undefined}
                     data-parallax={layer.depth !== undefined ? String(layer.depth) : undefined}
                     style={{ opacity: layer.opacity, transform: layer.rotate180 ? "rotate(180deg)" : undefined }}
@@ -517,6 +529,7 @@ export default function VoyageTemplate({ title, chunks, avatars }: TemplateProps
                 <img
                   src={destinations[i].palette.wheelPlanet}
                   alt=""
+                  decoding="async"
                   style={{ "--r": `${destinations[i].wheelAngle}deg` } as CSSProperties}
                 />
               </div>
@@ -548,57 +561,35 @@ export default function VoyageTemplate({ title, chunks, avatars }: TemplateProps
                 <h1 className="vg-hero-title" style={{ fontSize: voyageTitleFontSize(current.giantTitle) }}>
                   {current.giantTitle}
                 </h1>
-                {avatar && (
-                  <div className="vg-video">
-                    <AvatarDisplay avatar={avatar} emotion={chunk.emotion} />
-                  </div>
-                )}
               </div>
             </section>
 
             <div className="vg-gap" />
 
             <section className="vg-info">
-              <div className="vg-cards">
-                <ChunkCard className="vg-card-1" tab={`Chapter ${pad2(active + 1)}`}>
-                  <h3>{chunk.title}</h3>
-                  <p className="vg-text" data-audio={chunk.audioUrl ? "" : undefined}>
-                    {chunk.narrativeText
-                      .split(/\s+/)
-                      .filter(Boolean)
-                      .map((word, i) => (
-                        <Fragment key={i}>
-                          <span className="vg-word">{word}</span>{" "}
-                        </Fragment>
-                      ))}
-                  </p>
-                  {chunk.audioUrl && <audio src={chunk.audioUrl} />}
-                </ChunkCard>
-                <ChunkCard className="vg-card-2" tab="Key point" mirror>
-                  {current.pullQuote && (
-                    <blockquote className="vg-quote">
-                      <p>{current.pullQuote}</p>
-                    </blockquote>
-                  )}
-                  {current.bullets.length > 0 && (
-                    <ul className="vg-points">
-                      {current.bullets.map((bullet, i) => (
-                        <li key={i}>{bullet}</li>
-                      ))}
-                    </ul>
-                  )}
-                  <p className="vg-upnext">
-                    {active + 1 < total ? (
-                      <>
-                        <span className="k">Up next</span>
-                        <span>{nextDest.fullTitle}</span>
-                      </>
-                    ) : (
-                      <span className="k">Final chapter</span>
-                    )}
-                  </p>
-                </ChunkCard>
-              </div>
+              <ChapterLayout
+                theme={CHAPTER_THEMES.voyage}
+                index={active}
+                total={total}
+                eyebrow={`Chapter ${pad2(active + 1)}`}
+                title={chunk.title}
+                media={media}
+                lists={chapterLists(chunks.map((c) => ({ title: c.title, text: c.narrativeText })), active)}
+                nextLabel={active + 1 < total ? "Next chapter" : "All chapters"}
+                onNext={() => (active + 1 < total ? go("chunk", active + 1) : go("select", active))}
+              >
+                <p className="vg-text" data-audio={chunk.audioUrl ? "" : undefined}>
+                  {chunk.narrativeText
+                    .split(/\s+/)
+                    .filter(Boolean)
+                    .map((word, i) => (
+                      <Fragment key={i}>
+                        <span className="vg-word">{word}</span>{" "}
+                      </Fragment>
+                    ))}
+                </p>
+                {chunk.audioUrl && <audio src={chunk.audioUrl} />}
+              </ChapterLayout>
             </section>
 
             <section className="vg-end">
@@ -693,32 +684,10 @@ function ChunkArt({ dest }: { dest: VoyageDestination }) {
         return (
           <div key={layer.key} className={`vg-art-layer vg-art-${layer.key}`} data-scrub={[y, x, rotate, zoom].join(",")}>
             {/* eslint-disable-next-line @next/next/no-img-element */}
-            <img src={layer.src} alt="" />
+            <img src={layer.src} alt="" decoding="async" />
           </div>
         );
       })}
-    </div>
-  );
-}
-
-function ChunkCard({
-  tab,
-  mirror,
-  className,
-  children,
-}: {
-  tab: string;
-  mirror?: boolean;
-  className?: string;
-  children: React.ReactNode;
-}) {
-  return (
-    <div className={`vg-card${mirror ? " mirror" : ""} ${className ?? ""}`}>
-      <div className="vg-card-edge" />
-      <h2 className="vg-card-tab">
-        <span>{tab}</span>
-      </h2>
-      <div className="vg-card-body">{children}</div>
     </div>
   );
 }

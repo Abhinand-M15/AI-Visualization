@@ -48,7 +48,7 @@ export const VOYAGE_CSS = `
 
 /* ---- chunk page */
 .vg-art{position:fixed;inset:0;z-index:1;pointer-events:none;overflow:hidden}
-.vg-art-layer{position:absolute}
+.vg-art-layer{position:absolute;will-change:transform}
 .vg-art-layer img{display:block;width:100%;height:auto}
 .vg-art-planet{right:-6%;top:-14%;width:min(78vh,62vw)}
 .vg-art-prop{left:6%;top:24%;width:min(24vh,26vw)}
@@ -60,15 +60,20 @@ export const VOYAGE_CSS = `
 .vg-mask{display:inline-block;overflow:hidden;vertical-align:top;padding-bottom:.08em}
 .vg-mask>span{display:inline-block}
 .vg-page{position:relative;z-index:3}
+.vg-hero-title{will-change:transform}
 .vg-hero{min-height:100vh;display:flex;align-items:center;justify-content:center;padding:0 4vw}
 .vg-stage{position:relative;display:flex;flex-direction:column;align-items:center;max-width:96vw}
 .vg-hero-row{align-self:stretch;display:flex;justify-content:space-between;padding:0 .5vw 10px;font-size:14px;font-weight:700;letter-spacing:.08em;text-transform:uppercase}
 .vg-hero-title{margin:0;font-family:var(--vg-display,"Unbounded",sans-serif);font-weight:800;text-transform:uppercase;text-align:center;line-height:.95;color:var(--vg-accent);text-wrap:balance;overflow-wrap:anywhere}
 .vg-video{position:absolute;left:50%;top:50%;translate:-50% -56%;width:clamp(240px,34vw,560px);pointer-events:none}
 .vg-video video,.vg-video img{display:block;width:100%;height:auto;animation:vg-tilt 6s ease-in-out infinite;filter:drop-shadow(0 18px 14px rgba(0,0,0,.28))}
+.vg-video-scene{width:clamp(280px,46vw,720px)}
+.vg-video-scene img{border-radius:18px;aspect-ratio:16/9;object-fit:cover}
 @keyframes vg-tilt{0%,100%{rotate:0deg}50%{rotate:-2.5deg}}
 .vg-gap{height:100vh}
-.vg-info{min-height:100vh;display:flex;align-items:flex-end;padding:0 20px 24px}
+.vg-info{display:block;padding:0 20px 40px}
+.vg-info .cl-panel{backdrop-filter:blur(22px);-webkit-backdrop-filter:blur(22px)}
+.vg-root .cl-pill{color:var(--cl-pill-text);font-size:.8125rem;font-weight:500}
 .vg-cards{width:100%;max-width:1120px;margin:0 auto;display:grid;grid-template-columns:1fr;gap:28px;align-items:end}
 @media(min-width:900px){.vg-cards{grid-template-columns:1fr 1fr;gap:40px}}
 .vg-end{min-height:60vh;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;padding:0 20px 150px;text-align:center}

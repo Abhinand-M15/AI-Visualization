@@ -2,13 +2,20 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useDraftStore } from "@/lib/store";
 import { DOCUMENT_TYPES, type DocumentType } from "@/lib/types";
 import { SpaceBackdrop } from "@/components/SpaceBackdrop";
 import { LoadingBar } from "@/components/LoadingBar";
 import { UPLOAD_EXTENSIONS } from "@/app/api/uploads/shared";
 import { useApiKeyGate } from "@/app/settings/useApiKeyGate";
+import LogoUpload from "@/components/LogoUpload";
+
+interface DomainOption {
+  id: string;
+  slug: string;
+  name: string;
+}
 
 export default function NewStoryPage() {
   const router = useRouter();
@@ -19,13 +26,35 @@ export default function NewStoryPage() {
   const [file, setFile] = useState<File | null>(null);
   const [feedbackText, setFeedbackText] = useState("");
   const [targetChunkCount, setTargetChunkCount] = useState("");
+  // Optional industry domain; the dropdown stays hidden when none are available.
+  const [domains, setDomains] = useState<DomainOption[]>([]);
+  const [domainId, setDomainId] = useState("");
+  const [logoPath, setLogoPath] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/api/domains")
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (!cancelled && Array.isArray(data?.domains)) setDomains(data.domains as DomainOption[]);
+      })
+      .catch(() => {
+        // Domains are optional: on any failure the dropdown just stays hidden.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const isBusy = status === "generating" || status === "revising" || status === "saving";
 
   async function handleGenerate() {
     if (!file) return;
     const parsedCount = targetChunkCount.trim() ? Number(targetChunkCount) : undefined;
-    await generate(file, documentType, parsedCount);
+    await generate(file, documentType, parsedCount, {
+      ...(domainId && domains.some((domain) => domain.id === domainId) ? { domainId } : {}),
+      ...(logoPath ? { logoPath } : {}),
+    });
   }
 
   async function handleSave() {
@@ -111,6 +140,33 @@ export default function NewStoryPage() {
               ones are grouped together rather than dropped.
             </p>
           </div>
+
+          {domains.length > 0 && (
+            <div>
+              <label htmlFor="story-domain" className="mb-3 block text-lg font-medium text-neutral-700 dark:text-indigo-100">
+                Domain (optional)
+              </label>
+              <select
+                id="story-domain"
+                value={domainId}
+                disabled={isBusy}
+                onChange={(event) => setDomainId(event.target.value)}
+                className="w-full max-w-sm rounded-xl border border-neutral-200 bg-neutral-50 px-4 py-3 text-lg text-neutral-900 focus:border-violet-400 focus:outline-none dark:border-white/10 dark:bg-black/30 dark:text-white dark:focus:border-violet-400/60"
+              >
+                <option value="">No specific domain</option>
+                {domains.map((domain) => (
+                  <option key={domain.id} value={domain.id}>
+                    {domain.name}
+                  </option>
+                ))}
+              </select>
+              <p className="mt-3 text-base text-neutral-500 dark:text-indigo-200/50">
+                The story uses this industry&apos;s wording, and its avatars and scene images follow it.
+              </p>
+            </div>
+          )}
+
+          <LogoUpload value={logoPath} onChange={setLogoPath} />
 
           <button
             type="button"

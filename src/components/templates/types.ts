@@ -5,6 +5,8 @@ export interface TemplateProps {
   title: string;
   chunks: Chunk[];
   avatars: Avatar[];
+  /** Company logo (public URL). Templates render it with the shared StoryLogo element; nothing when unset. */
+  logoUrl?: string;
 }
 
 export function avatarForIndex(index: number, avatars: Avatar[]): Avatar | undefined {

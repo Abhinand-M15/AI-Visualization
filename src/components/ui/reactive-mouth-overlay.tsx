@@ -70,10 +70,8 @@ export function ReactiveMouthOverlay({
       window.AudioContext ?? (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
     if (!AudioContextCtor) return;
 
-    let audioCtx: AudioContext;
     let analyser: AnalyserNode;
     try {
-      audioCtx = new AudioContextCtor();
       // A given <audio> element can only ever have one MediaElementAudioSourceNode
       // created for it (a second attempt throws) — scrolling back to a section
       // remounts this component against the same element, so the node (and its
@@ -82,10 +80,14 @@ export function ReactiveMouthOverlay({
       type ReactiveTap = { source: MediaElementAudioSourceNode; ctx: AudioContext };
       const tapped = audioEl as HTMLAudioElement & { __reactiveTap?: ReactiveTap };
       let source: MediaElementAudioSourceNode;
+      // The context is created only when the element has none yet: creating one
+      // per mount leaked contexts (browsers allow only a handful) on every remount.
+      let audioCtx: AudioContext;
       if (tapped.__reactiveTap) {
         source = tapped.__reactiveTap.source;
         audioCtx = tapped.__reactiveTap.ctx;
       } else {
+        audioCtx = new AudioContextCtor();
         source = audioCtx.createMediaElementSource(audioEl);
         tapped.__reactiveTap = { source, ctx: audioCtx };
       }
@@ -106,7 +108,6 @@ export function ReactiveMouthOverlay({
     let smoothed = 0;
 
     function draw() {
-      rafId = requestAnimationFrame(draw);
       if (!ctx || !canvas) return;
 
       analyser.getByteTimeDomainData(dataArray);
@@ -137,10 +138,23 @@ export function ReactiveMouthOverlay({
       ctx.beginPath();
       ctx.ellipse(w / 2, h / 2, rx, ry, 0, 0, Math.PI * 2);
       ctx.fill();
+
+      // Keep animating while this section's narration plays, and until the mouth
+      // has settled closed after it stops; otherwise the loop sleeps.
+      if (audioEl && ((!audioEl.paused && !audioEl.ended) || smoothed > 0.01)) rafId = requestAnimationFrame(draw);
+      else rafId = 0;
     }
+    const start = () => {
+      if (!rafId) rafId = requestAnimationFrame(draw);
+    };
+    audioEl.addEventListener("play", start);
     draw();
 
-    return () => cancelAnimationFrame(rafId);
+    return () => {
+      audioEl.removeEventListener("play", start);
+      cancelAnimationFrame(rafId);
+      rafId = 0;
+    };
   }, [audioEl]);
 
   return (

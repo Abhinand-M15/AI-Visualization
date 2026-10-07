@@ -52,18 +52,27 @@ async function uploadDirect(file: File): Promise<string | null> {
   return ticket.path;
 }
 
+/** Optional extras sent with a generate request (domain dropdown, company logo). */
+export interface GenerateOptions {
+  domainId?: string;
+  logoPath?: string;
+}
+
 interface DraftState {
   documentType: DocumentType | null;
   sourceFileName?: string;
   /** documents.id of a direct upload (accounts on), linked to the project on save. */
   documentId?: string;
+  /** Domain and logo the server accepted for this draft; saved with the project. */
+  domainId?: string;
+  logoPath?: string;
   storyline: Storyline | null;
   status: Status;
   errorMessage?: string;
   /** Machine-readable error code from the API, e.g. 'missing_api_key'. */
   errorCode?: string;
 
-  generate: (file: File, documentType: DocumentType, targetChunkCount?: number) => Promise<void>;
+  generate: (file: File, documentType: DocumentType, targetChunkCount?: number, options?: GenerateOptions) => Promise<void>;
   editChunk: (chunkId: string, updates: Partial<Pick<Chunk, "title" | "narrativeText">>) => void;
   revise: (feedbackText: string) => Promise<void>;
   save: () => Promise<Project | null>;
@@ -74,13 +83,23 @@ export const useDraftStore = create<DraftState>((set, get) => ({
   documentType: null,
   sourceFileName: undefined,
   documentId: undefined,
+  domainId: undefined,
+  logoPath: undefined,
   storyline: null,
   status: "idle",
   errorMessage: undefined,
   errorCode: undefined,
 
-  generate: async (file, documentType, targetChunkCount) => {
-    set({ status: "generating", errorMessage: undefined, errorCode: undefined, documentType, documentId: undefined });
+  generate: async (file, documentType, targetChunkCount, options) => {
+    set({
+      status: "generating",
+      errorMessage: undefined,
+      errorCode: undefined,
+      documentType,
+      documentId: undefined,
+      domainId: undefined,
+      logoPath: undefined,
+    });
     try {
       // Preferred: upload straight to storage (no Vercel body-size limit), then
       // generate from the stored file. Falls back to the original multipart
@@ -93,13 +112,22 @@ export const useDraftStore = create<DraftState>((set, get) => ({
         res = await fetch("/api/parse-and-generate", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ storagePath, fileName: file.name, documentType, targetChunkCount }),
+          body: JSON.stringify({
+            storagePath,
+            fileName: file.name,
+            documentType,
+            targetChunkCount,
+            ...(options?.domainId ? { domainId: options.domainId } : {}),
+            ...(options?.logoPath ? { logoPath: options.logoPath } : {}),
+          }),
         });
       } else {
         const formData = new FormData();
         formData.append("file", file);
         formData.append("documentType", documentType);
         if (targetChunkCount) formData.append("targetChunkCount", String(targetChunkCount));
+        if (options?.domainId) formData.append("domainId", options.domainId);
+        if (options?.logoPath) formData.append("logoPath", options.logoPath);
         res = await fetch("/api/parse-and-generate", { method: "POST", body: formData });
       }
       const data = await res.json();
@@ -109,6 +137,8 @@ export const useDraftStore = create<DraftState>((set, get) => ({
         storyline: data.storyline,
         sourceFileName: data.sourceFileName,
         documentId: data.documentId,
+        domainId: typeof data.domainId === "string" ? data.domainId : undefined,
+        logoPath: typeof data.logoPath === "string" ? data.logoPath : undefined,
         status: "reviewing",
       });
     } catch (error) {
@@ -156,7 +186,7 @@ export const useDraftStore = create<DraftState>((set, get) => ({
   },
 
   save: async () => {
-    const { storyline, documentType, sourceFileName, documentId } = get();
+    const { storyline, documentType, sourceFileName, documentId, domainId, logoPath } = get();
     if (!storyline || !documentType) return null;
     set({ status: "saving", errorMessage: undefined });
     try {
@@ -169,6 +199,8 @@ export const useDraftStore = create<DraftState>((set, get) => ({
           sourceFileName,
           chunks: storyline.chunks,
           ...(documentId ? { documentId } : {}),
+          ...(domainId ? { domainId } : {}),
+          ...(logoPath ? { logoPath } : {}),
         }),
       });
       const data = await res.json();
@@ -186,6 +218,8 @@ export const useDraftStore = create<DraftState>((set, get) => ({
       documentType: null,
       sourceFileName: undefined,
       documentId: undefined,
+      domainId: undefined,
+      logoPath: undefined,
       storyline: null,
       status: "idle",
       errorMessage: undefined,

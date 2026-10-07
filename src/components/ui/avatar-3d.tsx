@@ -1,7 +1,7 @@
 "use client";
 
 import { Suspense, useEffect, useRef, useState } from "react";
-import { Canvas, useFrame } from "@react-three/fiber";
+import { Canvas, useFrame, useThree } from "@react-three/fiber";
 import { Bounds, Center, OrbitControls, useGLTF } from "@react-three/drei";
 import * as THREE from "three";
 import { cn } from "@/lib/utils";
@@ -15,12 +15,16 @@ function Model({ url, onHoverChange }: { url: string; onHoverChange: (hovered: b
   if (!cloned.current) cloned.current = scene.clone();
   const groupRef = useRef<THREE.Group>(null);
   const hoveredRef = useRef(false);
+  // The canvas renders on demand (see AvatarCanvas), so the hover scale asks for
+  // frames itself until it has settled.
+  const invalidate = useThree((state) => state.invalidate);
 
   useFrame((_, delta) => {
     if (!groupRef.current) return;
     const target = hoveredRef.current ? 1.08 : 1;
     const s = THREE.MathUtils.damp(groupRef.current.scale.x || 1, target, 6, delta);
     groupRef.current.scale.setScalar(s);
+    if (Math.abs(s - target) > 0.0005) invalidate();
   });
 
   return (
@@ -29,11 +33,13 @@ function Model({ url, onHoverChange }: { url: string; onHoverChange: (hovered: b
       onPointerOver={(e) => {
         e.stopPropagation();
         hoveredRef.current = true;
+        invalidate();
         onHoverChange(true);
       }}
       onPointerOut={(e) => {
         e.stopPropagation();
         hoveredRef.current = false;
+        invalidate();
         onHoverChange(false);
       }}
     >
@@ -49,7 +55,11 @@ function AvatarCanvas({ url }: { url: string }) {
     <div style={{ width: "100%", height: "100%", cursor: hovered ? "grab" : "default", touchAction: "pan-y" }}>
       <Canvas
         camera={{ fov: 32 }}
-        dpr={[1, 2]}
+        // Draws only when something changes (orbit, hover scale, resize, model loaded):
+        // an idle avatar no longer re-renders 60 times a second. dpr is a little
+        // lower on small screens.
+        frameloop="demand"
+        dpr={typeof window !== "undefined" && window.innerWidth < 768 ? [1, 1.5] : [1, 2]}
         gl={{
           alpha: true,
           antialias: true,

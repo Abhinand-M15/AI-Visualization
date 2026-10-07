@@ -3,18 +3,23 @@ import { access, readFile } from "node:fs/promises";
 import path from "node:path";
 import { getSupabase } from "@/lib/db";
 import {
+  isMissingSchemaError,
   PROJECT_SELECT_COLUMNS,
   rowToProject,
+  selectWithDomainColumns,
   updatedByFields,
   type ProjectPayload,
   type ProjectRow,
 } from "@/lib/projects";
 import { contentFingerprint } from "@/lib/contentVersion";
-import type { PublicationRecord } from "@/lib/types";
-import { AVATARS, avatarVideoFallbackUrl } from "@/lib/avatars";
+import type { Chunk, PublicationRecord } from "@/lib/types";
+import { AVATARS, avatarVideoFallbackUrl, type Avatar } from "@/lib/avatars";
+import { resolveAvatars } from "@/lib/domainAvatars";
+import { logoUrl as companyLogoUrl, sceneImageUrl } from "@/lib/storageUrls";
 import { VOYAGE_ASSET_ROOT, voyageAssetPaths, type VoyageMood } from "@/lib/voyage";
 import { showcaseAssetPaths } from "@/lib/showcase";
 import { LUNAR_MOON_TEXTURE_PUBLIC_PATH, renderStaticSite } from "@/lib/publish/staticSite";
+import { TEMPLATE_UNAVAILABLE_MESSAGE, isTemplateAvailable } from "@/lib/templates";
 import { deployToVercelDetailed, getPublishBaseDomain, type DeployFile } from "@/lib/publish/vercel";
 import { publishLocally } from "@/lib/publish/local";
 import { authEnabled, requireUser, unauthorizedResponse } from "@/lib/auth/session";
@@ -75,6 +80,131 @@ async function findVoyageMusic(baseUrl: string): Promise<Partial<Record<VoyageMo
   return found;
 }
 
+// ---------------------------------------------------------------------------
+// Bundling Supabase Storage images (domain avatars, scene images, company logo)
+// ---------------------------------------------------------------------------
+
+const IMAGE_EXTENSIONS: Record<string, string> = {
+  "image/png": "png",
+  "image/jpeg": "jpg",
+  "image/jpg": "jpg",
+  "image/webp": "webp",
+  "image/gif": "gif",
+  "image/svg+xml": "svg",
+  "image/avif": "avif",
+};
+
+function imageExtension(contentType: string | null, url: string): string {
+  const fromType = IMAGE_EXTENSIONS[(contentType ?? "").split(";")[0].trim().toLowerCase()];
+  if (fromType) return fromType;
+  const fromUrl = /\.([a-z0-9]{2,5})(?:[?#]|$)/i.exec(url)?.[1]?.toLowerCase();
+  return fromUrl && Object.values(IMAGE_EXTENSIONS).includes(fromUrl) ? fromUrl : "png";
+}
+
+function safeFileStem(value: string): string {
+  return value.replace(/[^a-z0-9_-]/gi, "-").slice(0, 60) || "file";
+}
+
+/**
+ * Downloads an image and adds it to the deploy files under `<folder>/<stem>.<ext>`.
+ * Returns the relative path, or null (with a warning) when the download fails.
+ */
+async function bundleImage(url: string, folder: string, stem: string, files: DeployFile[]): Promise<string | null> {
+  try {
+    const res = await fetch(url, { cache: "no-store", signal: AbortSignal.timeout(20_000) });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const bytes = Buffer.from(await res.arrayBuffer());
+    if (bytes.length === 0) throw new Error("empty response");
+    const file = `${folder}/${safeFileStem(stem)}.${imageExtension(res.headers.get("content-type"), url)}`;
+    files.push({ file, data: bytes.toString("base64"), encoding: "base64" });
+    return file;
+  } catch (error) {
+    console.warn(`publish: could not bundle ${folder} image ${stem}:`, error instanceof Error ? error.message : error);
+    return null;
+  }
+}
+
+/** Runs `task` over `items` a few at a time, keeping order. */
+async function mapInBatches<T, R>(items: T[], size: number, task: (item: T) => Promise<R>): Promise<R[]> {
+  const out: R[] = [];
+  for (let i = 0; i < items.length; i += size) out.push(...(await Promise.all(items.slice(i, i + size).map(task))));
+  return out;
+}
+
+const isRemoteUrl = (value: string | undefined): value is string => Boolean(value && /^https?:\/\//i.test(value));
+
+/** Generated (domain) avatars carry public Storage URLs; bundle them and point the avatar at the bundled file. */
+async function bundleDomainAvatars(avatars: Avatar[], files: DeployFile[]): Promise<Avatar[]> {
+  return mapInBatches(avatars, 2, async (avatar) => {
+    const urls = Array.from(new Set([avatar.imageUrl, ...Object.values(avatar.emotions)].filter(isRemoteUrl)));
+    if (urls.length === 0) return avatar;
+    const bundled = new Map<string, string>();
+    for (const [i, url] of urls.entries()) {
+      const file = await bundleImage(url, "story-avatars", `${avatar.id.replace(/^domain:/, "")}-${i}`, files);
+      if (file) bundled.set(url, file);
+    }
+    const swap = (url: string | undefined) => (url && bundled.get(url)) || url;
+    return {
+      ...avatar,
+      imageUrl: swap(avatar.imageUrl) ?? avatar.imageUrl,
+      emotions: Object.fromEntries(Object.entries(avatar.emotions).map(([key, url]) => [key, swap(url)])) as Avatar["emotions"],
+    };
+  });
+}
+
+/**
+ * Chapters with a ready scene image get it bundled and `imageUrl` set to the
+ * relative path. Chapters whose image is missing or fails to download lose
+ * imageUrl, so they fall back to the avatar exactly as before. Without
+ * migration 003 (no chapter_images table) nothing changes.
+ */
+async function bundleSceneImages(
+  supabase: ReturnType<typeof getSupabase>,
+  projectId: string,
+  chunks: Chunk[],
+  files: DeployFile[]
+): Promise<Chunk[]> {
+  const pathByChunk = new Map<string, string>();
+  try {
+    const { data, error } = await supabase
+      .from("chapter_images")
+      .select("chunk_id, image_path, status")
+      .eq("project_id", projectId)
+      .eq("status", "ready");
+    if (error) {
+      if (!isMissingSchemaError(error)) console.warn("publish: reading chapter_images failed:", error.message);
+    } else {
+      for (const row of (data ?? []) as { chunk_id: string; image_path: string | null }[]) {
+        if (row.image_path) pathByChunk.set(row.chunk_id, row.image_path);
+      }
+    }
+  } catch (error) {
+    console.warn("publish: reading chapter_images failed:", error instanceof Error ? error.message : error);
+  }
+
+  return mapInBatches(chunks, 4, async (chunk) => {
+    const storagePath = pathByChunk.get(chunk.id);
+    let source: string | undefined;
+    try {
+      source = storagePath ? sceneImageUrl(storagePath) : isRemoteUrl(chunk.imageUrl) ? chunk.imageUrl : undefined;
+    } catch {
+      source = undefined;
+    }
+    if (!source) return chunk.imageUrl ? { ...chunk, imageUrl: undefined } : chunk;
+    const file = await bundleImage(source, "scene-images", chunk.id, files);
+    return { ...chunk, imageUrl: file ?? undefined };
+  });
+}
+
+/** The company logo (company-logos bucket) bundled as `logo/logo.<ext>`; undefined when it can't be fetched. */
+async function bundleLogo(logoPath: string, files: DeployFile[]): Promise<string | undefined> {
+  try {
+    return (await bundleImage(companyLogoUrl(logoPath), "logo", "logo", files)) ?? undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function sanitizeProjectName(id: string): string {
   return `story-${id.replace(/[^a-z0-9]/gi, "").slice(0, 16).toLowerCase()}`;
 }
@@ -100,9 +230,12 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
       subdomain = validation.value;
     }
 
-    let query = supabase.from("projects").select(PROJECT_SELECT_COLUMNS).eq("id", id);
-    if (user) query = query.eq("owner_id", user.id);
-    const { data: existing, error: fetchError } = await query.maybeSingle();
+    // Includes domain_id / domain_avatar_id / logo_path once migration 003 is applied (falls back without them).
+    const { data: existing, error: fetchError } = await selectWithDomainColumns(PROJECT_SELECT_COLUMNS, (columns) => {
+      let query = supabase.from("projects").select(columns).eq("id", id);
+      if (user) query = query.eq("owner_id", user.id);
+      return query.maybeSingle();
+    });
 
     if (fetchError) throw new Error(fetchError.message);
     if (!existing) {
@@ -136,6 +269,11 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
     if (!isCaseStudy && !project.selectedTemplateId) {
       return NextResponse.json({ error: "Select a template before publishing." }, { status: 400 });
     }
+    // A template that was removed or hidden since it was picked never publishes
+    // with a surprise look (case studies publish their own layout, see above).
+    if (!isCaseStudy && !isTemplateAvailable(project.selectedTemplateId)) {
+      return NextResponse.json({ error: TEMPLATE_UNAVAILABLE_MESSAGE }, { status: 400 });
+    }
     if (!project.selectedAvatarIds || project.selectedAvatarIds.length === 0) {
       return NextResponse.json({ error: "Select at least one avatar before publishing." }, { status: 400 });
     }
@@ -159,9 +297,24 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
     if (!supabaseUrl) throw new Error("SUPABASE_URL is not set.");
     const baseUrl = assetBaseUrl(new URL(request.url).origin);
 
-    const selectedAvatars = project.selectedAvatarIds
-      .map((avatarId) => AVATARS.find((avatar) => avatar.id === avatarId))
-      .filter((avatar): avatar is (typeof AVATARS)[number] => Boolean(avatar));
+    // Static ids resolve from AVATARS, domain ids from the database (resolveAvatars); order is kept.
+    const resolvedAvatars = await resolveAvatars(project.selectedAvatarIds).catch((error) => {
+      console.warn("publish: resolving avatars failed:", error instanceof Error ? error.message : error);
+      return [] as Avatar[];
+    });
+    const resolvedAvatarList = project.selectedAvatarIds
+      .map((avatarId) => resolvedAvatars.find((avatar) => avatar.id === avatarId) ?? AVATARS.find((avatar) => avatar.id === avatarId))
+      .filter((avatar): avatar is Avatar => Boolean(avatar));
+
+    // Generated avatars, scene images and the logo live in Supabase Storage; they are copied into the deploy bundle
+    // so the published site is self-contained. A failed download never fails the publish. Showcase is left as it was.
+    const bundlesMedia = project.selectedTemplateId !== "showcase";
+    const storageFiles: DeployFile[] = [];
+    const selectedAvatars = await bundleDomainAvatars(resolvedAvatarList, storageFiles);
+    const bundledChunks =
+      isCaseStudy || !bundlesMedia ? project.chunks : await bundleSceneImages(supabase, id, project.chunks, storageFiles);
+    const rowLogoPath = (existing as unknown as ProjectRow).logo_path;
+    const bundledLogo = rowLogoPath && bundlesMedia ? await bundleLogo(rowLogoPath, storageFiles) : undefined;
 
     // Upload every emotion pose for each selected avatar — small files, and simpler
     // than computing exactly which emotions this story's chunks actually use.
@@ -207,10 +360,12 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
       })
     );
 
-    const html = renderStaticSite(project, selectedAvatars, supabaseUrl, { voyage: { customMusic: voyageMusic } });
+    const siteProject = { ...project, chunks: bundledChunks, logoUrl: bundledLogo };
+    const html = renderStaticSite(siteProject, selectedAvatars, supabaseUrl, { voyage: { customMusic: voyageMusic } });
     const files: DeployFile[] = [
       { file: "index.html", data: Buffer.from(html, "utf-8").toString("base64"), encoding: "base64" },
       ...avatarDeployFiles,
+      ...storageFiles,
     ];
 
     // Hosting for now: localhost, until a VERCEL_TOKEN is provided (see memory

@@ -2,7 +2,7 @@
 
 Phase 1: upload a document (PDF, PPTX, or XLSX), have an AI agent turn it into a chunked, narrated story, review/edit chunks, and regenerate with feedback.
 Phase 2: pick a voice, generate per-chunk narration audio, play it back inline.
-Phase 3: pick an avatar (or both) and a template (Editorial, Clarity, Cinematic), preview the assembled site.
+Phase 3: pick an avatar (or both) and a template (Space, Lunar, Airlock, Voyage, Showcase; see docs/REMOVING_TEMPLATES.md), preview the assembled site.
 Phase 4: publish — bakes the selected template + chunks + audio + avatar into a static site and deploys it (localhost for now, or a real Vercel URL once `VERCEL_TOKEN` is set).
 Phase 5: polish — edit chunks and regenerate-with-feedback after the initial save (not just before), delete a project (DB row + its audio files + any localhost-published copy), and a voice-preview button before committing to full audio generation. This closes out the original plan — see `.claude/plans` in the AI VIZUALIZATION repo for the full history.
 

@@ -5,6 +5,8 @@ import { createPortal } from "react-dom";
 import type { Project } from "@/lib/types";
 import { LoadingBar } from "@/components/LoadingBar";
 import { plural, summarizeNarration } from "@/lib/contentVersion";
+import { TEMPLATE_UNAVAILABLE_NOTICE } from "@/lib/templates";
+import { useAvailableTemplates } from "@/lib/useAvailableTemplates";
 import { readNdjsonStream } from "@/lib/readNdjsonStream";
 import {
   PUBLISH_NAME_PREFIX,
@@ -82,6 +84,10 @@ export function PublishDialog({ project, voice, onClose, onProjectUpdate }: Publ
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
 
+  const { isAvailable: isTemplateAvailable } = useAvailableTemplates();
+  // Case studies publish their own layout, so a stale template id doesn't block them.
+  const templateGone =
+    project.documentType !== "case-study" && Boolean(project.selectedTemplateId) && !isTemplateAvailable(project.selectedTemplateId);
   const busy = phase.kind === "narrating" || phase.kind === "publishing";
   const currentSubdomain = suffix ? subdomainFromUrl(project.publishedUrl, suffix, prefix) : null;
   // A site published before custom addresses existed (story-<id>, or a local
@@ -299,6 +305,7 @@ export function PublishDialog({ project, voice, onClose, onProjectUpdate }: Publ
   const canPublish =
     !busy &&
     !needsVoice &&
+    !templateGone &&
     (keepingLegacy || check.kind === "available" || check.kind === "yours" || check.kind === "current");
   const changingAddress =
     (currentSubdomain !== null && validation.ok && validation.value !== currentSubdomain) ||
@@ -507,6 +514,9 @@ export function PublishDialog({ project, voice, onClose, onProjectUpdate }: Publ
             )}
             {phase.kind === "publishing" && <LoadingBar label="Publishing the site… this can take a minute or two." />}
 
+            {templateGone && (
+              <p className="text-xs font-medium text-amber-700 dark:text-amber-300">{TEMPLATE_UNAVAILABLE_NOTICE}</p>
+            )}
             {error && (
               <p role="alert" className="text-xs text-red-600 dark:text-red-400">
                 {error}

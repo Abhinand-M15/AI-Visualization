@@ -218,6 +218,11 @@ export default function AirlockHero({
             b.left = "0"
             b.right = "0"
             b.width = "100%"
+            // The listeners that can cancel a scroll are non-passive, so they exist
+            // only while the hero holds the page: afterwards the page scrolls
+            // without waiting on them.
+            window.addEventListener("wheel", onWheel, { passive: false })
+            window.addEventListener("touchmove", onTouchMove, { passive: false })
         }
         function releaseLock() {
             if (!locked) return
@@ -229,6 +234,8 @@ export default function AirlockHero({
             b.left = ""
             b.right = ""
             b.width = ""
+            window.removeEventListener("wheel", onWheel)
+            window.removeEventListener("touchmove", onTouchMove)
             window.scrollTo(0, y)
             released = true
             lastY = y
@@ -255,6 +262,7 @@ export default function AirlockHero({
             }
             target = clamp(target + deltaY / totalDistance, 0, 1)
             if (target > 0.001) moved = true
+            kick()
             return true
         }
         /* --- Input --------------------------------------------------------- */
@@ -290,9 +298,25 @@ export default function AirlockHero({
                 target = shown = 1
                 paint(1)
                 engageLock()
+                kick()
             }
         }
         /* --- Wiring -------------------------------------------------------- */
+        // The paint loop runs only while the picture is catching up with the
+        // input, not for the life of the page.
+        let running = false
+        const frame = () => {
+            shown += (target - shown) * 0.18
+            if (Math.abs(target - shown) < 0.0005) shown = target
+            paint(shown)
+            if (shown !== target) rafId = requestAnimationFrame(frame)
+            else running = false
+        }
+        function kick() {
+            if (running) return
+            running = true
+            rafId = requestAnimationFrame(frame)
+        }
         const onLoadedData = () => {
             duration = video!.duration || 0
             setReady(true)
@@ -307,17 +331,10 @@ export default function AirlockHero({
         video.addEventListener("seeked", onSeeked)
         if (!reduceMotion) {
             if (window.scrollY <= section.offsetTop + 1) engageLock()
-            window.addEventListener("wheel", onWheel, { passive: false })
             window.addEventListener("touchstart", onTouchStart, { passive: true })
-            window.addEventListener("touchmove", onTouchMove, { passive: false })
             window.addEventListener("keydown", onKeyDown)
             window.addEventListener("scroll", onScroll, { passive: true })
-            const frame = () => {
-                shown += (target - shown) * 0.18
-                paint(shown)
-                rafId = requestAnimationFrame(frame)
-            }
-            rafId = requestAnimationFrame(frame)
+            kick()
         }
         return () => {
             video.removeEventListener("loadeddata", onLoadedData)

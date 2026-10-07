@@ -17,11 +17,10 @@ export interface NarrationDockTheme {
   border?: string;
 }
 
-/** Per-template looks: dark glass for the space-like templates, light for Editorial/Clarity,
+/** Per-template looks: dark glass for the space-like templates, light for the case-study layout,
  *  chamfered accent for Voyage. Used by the preview components and the published pages alike. */
 export const NARRATION_DOCK_THEMES = {
   light: { variant: "light" },
-  cinematic: { variant: "dark", accent: "#fff", border: "rgba(255,255,255,.18)" },
   space: { variant: "dark", accent: "#fff", border: "rgba(255,255,255,.18)" },
   airlock: { variant: "dark", accent: "#fff", border: "rgba(255,255,255,.18)" },
   lunar: { variant: "dark", accent: "#67e8f9", border: "rgba(103,232,249,.3)" },

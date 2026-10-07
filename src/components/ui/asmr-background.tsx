@@ -47,6 +47,9 @@ export function ASMRBackground({ className }: { className?: string }) {
       rotation = 0;
       rotationSpeed = 0;
       frictionGlow = 0;
+      // Fill style is only rebuilt when the alpha actually changes (most particles never glow).
+      private styleAlpha = -1;
+      private style = "";
 
       constructor() {
         this.reset();
@@ -111,14 +114,20 @@ export function ASMRBackground({ className }: { className?: string }) {
 
       draw() {
         if (!ctx) return;
-        ctx.save();
-        ctx.translate(this.x, this.y);
-        ctx.rotate(this.rotation);
+        // One setTransform instead of save/translate/rotate/restore per particle.
+        const cos = Math.cos(this.rotation);
+        const sin = Math.sin(this.rotation);
+        ctx.setTransform(cos, sin, -sin, cos, this.x, this.y);
 
         const finalAlpha = Math.min(this.alpha + this.frictionGlow, 0.9);
-        ctx.fillStyle = `rgba(${this.color}, ${finalAlpha})`;
+        if (finalAlpha !== this.styleAlpha) {
+          this.styleAlpha = finalAlpha;
+          this.style = `rgba(${this.color}, ${finalAlpha})`;
+        }
+        ctx.fillStyle = this.style;
 
-        if (this.frictionGlow > 0.3) {
+        const glowing = this.frictionGlow > 0.3;
+        if (glowing) {
           ctx.shadowBlur = 8 * this.frictionGlow;
           ctx.shadowColor = `rgba(180, 220, 255, ${this.frictionGlow})`;
         }
@@ -132,7 +141,7 @@ export function ASMRBackground({ className }: { className?: string }) {
         ctx.closePath();
         ctx.fill();
 
-        ctx.restore();
+        if (glowing) ctx.shadowBlur = 0;
       }
     }
 
@@ -145,25 +154,56 @@ export function ASMRBackground({ className }: { className?: string }) {
       }
     };
 
+    // Resize is coalesced to one frame and keeps the particles (rescaled)
+    // instead of respawning them: a phone's address bar collapsing while
+    // scrolling fires resize and used to make the whole field jump.
+    let resizeFrame = 0;
+    const handleResize = () => {
+      if (resizeFrame) return;
+      resizeFrame = requestAnimationFrame(() => {
+        resizeFrame = 0;
+        const nextW = window.innerWidth;
+        const nextH = window.innerHeight;
+        if (nextW === width && nextH === height) return;
+        const sx = nextW / width;
+        const sy = nextH / height;
+        width = canvas.width = nextW;
+        height = canvas.height = nextH;
+        for (const p of particles) {
+          p.x *= sx;
+          p.y *= sy;
+        }
+      });
+    };
+
+    let cursorX = -1000;
+    let cursorY = -1000;
+    let cursorDirty = false;
+
     const render = () => {
+      animationFrameId = requestAnimationFrame(render);
+      // The cursor dot follows the pointer, written once per frame rather than once per event.
+      if (cursorDirty && cursorRef.current) {
+        cursorDirty = false;
+        cursorRef.current.style.transform = `translate(calc(${cursorX}px - 50%), calc(${cursorY}px - 50%))`;
+      }
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
       // Slight motion blur trail
       ctx.fillStyle = "rgba(10, 10, 12, 0.18)";
       ctx.fillRect(0, 0, width, height);
 
-      particles.forEach((p) => {
-        p.update();
-        p.draw();
-      });
-
-      animationFrameId = requestAnimationFrame(render);
+      for (let i = 0; i < particles.length; i++) {
+        particles[i].update();
+        particles[i].draw();
+      }
     };
 
     const handleMouseMove = (e: MouseEvent) => {
       mouse.x = e.clientX;
       mouse.y = e.clientY;
-      if (cursorRef.current) {
-        cursorRef.current.style.transform = `translate(calc(${e.clientX}px - 50%), calc(${e.clientY}px - 50%))`;
-      }
+      cursorX = e.clientX;
+      cursorY = e.clientY;
+      cursorDirty = true;
     };
 
     const handleTouchMove = (e: TouchEvent) => {
@@ -173,15 +213,16 @@ export function ASMRBackground({ className }: { className?: string }) {
       }
     };
 
-    window.addEventListener("resize", init);
-    window.addEventListener("mousemove", handleMouseMove);
-    window.addEventListener("touchmove", handleTouchMove);
+    window.addEventListener("resize", handleResize);
+    window.addEventListener("mousemove", handleMouseMove, { passive: true });
+    window.addEventListener("touchmove", handleTouchMove, { passive: true });
 
     init();
     render();
 
     return () => {
-      window.removeEventListener("resize", init);
+      window.removeEventListener("resize", handleResize);
+      cancelAnimationFrame(resizeFrame);
       window.removeEventListener("mousemove", handleMouseMove);
       window.removeEventListener("touchmove", handleTouchMove);
       cancelAnimationFrame(animationFrameId);

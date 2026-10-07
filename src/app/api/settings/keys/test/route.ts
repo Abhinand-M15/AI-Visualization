@@ -1,11 +1,11 @@
 import { NextResponse } from "next/server";
 import { requireUser, unauthorizedResponse } from "@/lib/auth/session";
-import { getUserKey, isKeyProvider, testGeminiKey } from "@/lib/userKeys";
+import { getUserKey, isKeyProvider, testGeminiKey, testOpenAiKey } from "@/lib/userKeys";
 
 /**
- * POST { provider?: 'gemini', key?: string }
+ * POST { provider?: 'gemini' | 'openai', key?: string }
  * Tests `key` if given (e.g. before saving it), otherwise the caller's saved
- * key, with one cheap read-only Gemini request. Replies { ok, message }; the
+ * key, with one cheap read-only request to that provider. Replies { ok, message }; the
  * key is never echoed back.
  */
 export async function POST(request: Request) {
@@ -28,7 +28,7 @@ export async function POST(request: Request) {
       }
     }
 
-    return NextResponse.json(await testGeminiKey(key));
+    return NextResponse.json(provider === "openai" ? await testOpenAiKey(key) : await testGeminiKey(key));
   } catch (error) {
     const unauthorized = unauthorizedResponse(error);
     if (unauthorized) return unauthorized;
