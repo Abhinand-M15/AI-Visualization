@@ -19,3 +19,9 @@ export function openaiImageModel(): string {
 export const IMAGE_REQUEST_TIMEOUT_MS = 100_000;
 /** One retry on 429 / 5xx after this pause. */
 export const IMAGE_RETRY_BACKOFF_MS = 2_500;
+
+/** Text models (tried in order) used for the scene director that writes each chapter's scene brief. Override the first with GEMINI_TEXT_MODEL. */
+export function geminiTextModels(): string[] {
+  const override = process.env.GEMINI_TEXT_MODEL?.trim();
+  return [...(override ? [override] : []), "gemini-flash-latest", "gemini-flash-lite-latest"];
+}

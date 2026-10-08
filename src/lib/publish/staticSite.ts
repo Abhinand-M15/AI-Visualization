@@ -1900,7 +1900,7 @@ export function renderStaticSite(
   options: { voyage?: VoyageSiteOptions } = {}
 ): string {
   const html = renderStaticSiteBody(project, avatars, supabaseUrl, options);
-  // Showcase is left as it was: no logo, no scene images.
+  // Showcase draws the logo in its own header (see showcaseSite), so it is not injected a second time.
   return project.selectedTemplateId === "showcase" ? html : injectStoryLogo(html, project.logoUrl);
 }
 

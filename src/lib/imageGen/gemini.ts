@@ -1,10 +1,10 @@
 /**
  * Gemini image generation via generateContent (responseModalities + imageConfig.aspectRatio).
- * The reference image goes in as an inline_data part before the text prompt.
+ * Reference images go in as inline_data parts (in order) before the text prompt.
  */
 import type { ImageGenerator } from "./types";
 import { geminiImageModel } from "./constants";
-import { ImageGenerationError, errorDetail, fetchWithRetry } from "./http";
+import { ImageGenerationError, collectReferences, errorDetail, fetchWithRetry } from "./http";
 
 type GenerateOpts = Parameters<ImageGenerator["generate"]>[0];
 
@@ -30,10 +30,8 @@ interface GeminiResponse {
 
 export function buildGeminiRequest(opts: GenerateOpts) {
   const parts: Record<string, unknown>[] = [];
-  if (opts.referenceImage) {
-    parts.push({
-      inline_data: { mime_type: opts.referenceImage.mimeType, data: opts.referenceImage.data.toString("base64") },
-    });
+  for (const ref of collectReferences(opts)) {
+    parts.push({ inline_data: { mime_type: ref.mimeType, data: ref.data.toString("base64") } });
   }
   parts.push({ text: opts.prompt });
   return {

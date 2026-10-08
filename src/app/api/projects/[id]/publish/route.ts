@@ -307,14 +307,12 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
       .filter((avatar): avatar is Avatar => Boolean(avatar));
 
     // Generated avatars, scene images and the logo live in Supabase Storage; they are copied into the deploy bundle
-    // so the published site is self-contained. A failed download never fails the publish. Showcase is left as it was.
-    const bundlesMedia = project.selectedTemplateId !== "showcase";
+    // so the published site is self-contained (Showcase too: tiles, chapter pages and header use them). A failed download never fails the publish.
     const storageFiles: DeployFile[] = [];
     const selectedAvatars = await bundleDomainAvatars(resolvedAvatarList, storageFiles);
-    const bundledChunks =
-      isCaseStudy || !bundlesMedia ? project.chunks : await bundleSceneImages(supabase, id, project.chunks, storageFiles);
+    const bundledChunks = isCaseStudy ? project.chunks : await bundleSceneImages(supabase, id, project.chunks, storageFiles);
     const rowLogoPath = (existing as unknown as ProjectRow).logo_path;
-    const bundledLogo = rowLogoPath && bundlesMedia ? await bundleLogo(rowLogoPath, storageFiles) : undefined;
+    const bundledLogo = rowLogoPath ? await bundleLogo(rowLogoPath, storageFiles) : undefined;
 
     // Upload every emotion pose for each selected avatar — small files, and simpler
     // than computing exactly which emotions this story's chunks actually use.

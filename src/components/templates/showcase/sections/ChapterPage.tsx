@@ -11,12 +11,12 @@ import { Header } from "./Header";
 /**
  * Chapter page template. One layout, filled from a `ShowcaseChapter`.
  *
- * Desktop: a sticky 100vh stage; vertical scroll slides a horizontal strip
- * (title, media, the narration text and chapter links) with a single transform
- * per frame. Mobile: the same content stacked vertically.
+ * A single vertical column (desktop and mobile alike): title and tags, the
+ * pictures, the narration text, then the Next pill and chapter links. The page
+ * scrolls normally; each picture gets its own scroll effect (zoom, tilt, reveal,
+ * inner slide, rise) from its position in the viewport, and the text blocks rise
+ * into place from below as they come into view.
  */
-
-const DESKTOP_QUERY = "(min-width: 1024px)";
 
 type FxKind = "main" | "zoom" | "tilt" | "reveal" | "slide" | "rise";
 /** Scroll effect per gallery item after the main one, repeating. */
@@ -58,7 +58,7 @@ function LazyVideo({ item }: { item: ShowcaseMediaItem }) {
   );
 }
 
-/** One strip item: the picture (generated art unless the real-picture slot is filled),
+/** One gallery item: the picture (generated art unless the real-picture slot is filled),
  *  with the avatar's image or video on top when the item has one. */
 function Media({ item, picture, priority }: { item: ShowcaseMediaItem; picture: string; priority: boolean }) {
   return (
@@ -73,6 +73,7 @@ function Media({ item, picture, priority }: { item: ShowcaseMediaItem; picture: 
         decoding="async"
         draggable={false}
         className="block h-full w-full object-cover"
+        style={item.focus ? { objectPosition: item.focus } : undefined}
       />
       {item.videoSrc ? (
         <LazyVideo item={item} />
@@ -100,6 +101,12 @@ function titleSizes(title: string): { lg: string; sm: string } {
   return { lg: "2.2vw", sm: "6.5vw" };
 }
 
+/** Desktop width of a gallery figure: wide pictures fill most of the column, portrait ones are narrower; never taller than ~82vh. */
+function figureWidth(item: ShowcaseMediaItem): string {
+  const ratio = item.width / item.height;
+  return `min(${ratio >= 1 ? "var(--pd-col)" : "42vw"}, ${(82 * ratio).toFixed(1)}vh)`;
+}
+
 /** Splits a paragraph into word spans the audio can light up. */
 function Words({ text }: { text: string }) {
   return (
@@ -123,8 +130,7 @@ export function ChapterPage({ chapter }: { chapter: ShowcaseChapter }) {
   const prev = chapter.index > 0 ? story.chapters[chapter.index - 1] : null;
   const next = chapter.index + 1 < total ? story.chapters[chapter.index + 1] : null;
   const rootRef = useRef<HTMLDivElement>(null);
-  const trackRef = useRef<HTMLDivElement>(null);
-  const stripRef = useRef<HTMLDivElement>(null);
+  const columnRef = useRef<HTMLDivElement>(null);
   const audioRef = useRef<HTMLAudioElement>(null);
   const textRef = useRef<HTMLDivElement>(null);
   const mainRef = useRef<HTMLElement>(null);
@@ -198,82 +204,93 @@ export function ChapterPage({ chapter }: { chapter: ShowcaseChapter }) {
     };
   }, [chapter.audioUrl, chapter.slug, next, router]);
 
-  // Vertical scroll -> horizontal strip (desktop only). One transform on the strip,
-  // plus a different scroll effect per gallery item, all driven from known positions
-  // (no layout reads while scrolling).
+  // Scroll effects. The page scrolls normally; each picture gets its own effect from
+  // where it sits in the viewport (t: -1 above centre ... +1 below), applied with one
+  // transform per picture per frame from positions measured up front (no layout reads
+  // while scrolling). The text blocks rise into place from below as they appear.
   useEffect(() => {
-    const track = trackRef.current;
-    const strip = stripRef.current;
-    if (!track || !strip) return;
-    const mq = window.matchMedia(DESKTOP_QUERY);
+    const column = columnRef.current;
+    if (!column) return;
+    const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+    const risers = Array.from(column.querySelectorAll<HTMLElement>(".sc-rise"));
+    let io: IntersectionObserver | null = null;
+    if (reduce) {
+      for (const el of risers) el.classList.add("sc-in");
+      return undefined;
+    }
+    io = new IntersectionObserver(
+      (entries) => {
+        for (const e of entries) {
+          if (e.isIntersecting) {
+            e.target.classList.add("sc-in");
+            io?.unobserve(e.target);
+          }
+        }
+      },
+      { threshold: 0.12, rootMargin: "0px 0px -6% 0px" },
+    );
+    for (const el of risers) io.observe(el);
 
     interface Fx {
       el: HTMLElement;
       img: HTMLElement | null;
       kind: FxKind;
-      left: number;
-      width: number;
+      top: number;
+      height: number;
     }
-    const items: Fx[] = Array.from(strip.querySelectorAll<HTMLElement>("figure")).map((el, i) => ({
+    const items: Fx[] = Array.from(column.querySelectorAll<HTMLElement>("figure")).map((el, i) => ({
       el,
       img: el.firstElementChild instanceof HTMLElement ? el.firstElementChild : null,
       kind: i === 0 ? "main" : FX_CYCLE[(i - 1) % FX_CYCLE.length],
-      left: 0,
-      width: 0,
+      top: 0,
+      height: 0,
     }));
 
-    let max = 0;
     let raf = 0;
-    let lastX = Number.NaN;
+    let lastY = Number.NaN;
+    let lastBlur = -1;
     let smoothed = 0;
 
-    const clearItems = (): void => {
-      for (const it of items) {
-        it.el.style.removeProperty("transform");
-        it.el.style.removeProperty("filter");
-        it.el.style.removeProperty("clip-path");
-        it.el.style.removeProperty("will-change");
-        it.img?.style.removeProperty("transform");
-        it.img?.style.removeProperty("will-change");
-      }
-    };
-
-    const applyItems = (x: number, blur: number): void => {
-      const vw = window.innerWidth;
+    const applyItems = (y: number, blur: number): void => {
       const vh = window.innerHeight;
       for (let i = 0; i < items.length; i++) {
         const it = items[i];
-        const cx = it.left + it.width / 2 + x;
-        const t = Math.max(-1.6, Math.min(1.6, (cx - vw / 2) / (vw * 0.6)));
+        const cy = it.top + it.height / 2 - y;
+        const t = Math.max(-1.6, Math.min(1.6, (cy - vh / 2) / (vh * 0.6)));
         const a = Math.min(1, Math.abs(t));
         const stretch = 1 + blur * 0.008;
-        let figureT = `scaleX(${stretch.toFixed(3)})`;
+        // every picture but the first (the one the tile lands on) also eases up from below
+        const enter = it.kind === "main" ? 0 : Math.max(0, t - 0.55) * 0.09 * vh;
+        let figureT = `scaleY(${stretch.toFixed(3)})`;
         let imgT = "";
         let clip = "";
         switch (it.kind) {
           case "main":
-            imgT = `translate3d(${(-t * 6).toFixed(2)}%, 0, 0) scale(1.14)`;
+            // clamps keep the picture's scaled-up margin from running out at the extremes
+            imgT = `translate3d(0, ${(-Math.max(-1.1, Math.min(1.1, t)) * 6).toFixed(2)}%, 0) scale(1.14)`;
             break;
           case "zoom":
             figureT = `scale(${(1 - 0.1 * a).toFixed(3)}) ${figureT}`;
             imgT = `scale(${(1 + 0.24 * a).toFixed(3)})`;
             break;
           case "tilt":
-            figureT = `perspective(1400px) rotateY(${(-t * 16).toFixed(2)}deg) ${figureT}`;
+            figureT = `perspective(1400px) rotateX(${(t * 14).toFixed(2)}deg) ${figureT}`;
             imgT = "scale(1.1)";
             break;
           case "reveal":
             clip = `inset(0 ${(Math.max(0, Math.min(1, (t - 0.05) / 0.85)) * 100).toFixed(2)}% 0 0 round 15px)`;
-            imgT = `translate3d(${(t * 8).toFixed(2)}%, 0, 0) scale(1.12)`;
+            imgT = `translate3d(${(Math.max(-0.75, Math.min(0.75, t)) * 8).toFixed(2)}%, 0, 0) scale(1.12)`;
             break;
           case "slide":
-            imgT = `translate3d(${(-t * 12).toFixed(2)}%, 0, 0) scale(1.28)`;
+            imgT = `translate3d(${(-Math.max(-1.15, Math.min(1.15, t)) * 12).toFixed(2)}%, 0, 0) scale(1.28)`;
             break;
           case "rise":
             figureT = `translate3d(0, ${(t * 7 * (i % 2 ? 1 : -1) * (vh / 100)).toFixed(1)}px, 0) ${figureT}`;
             imgT = "scale(1.08)";
             break;
         }
+        if (enter > 0) figureT = `translate3d(0, ${enter.toFixed(1)}px, 0) ${figureT}`;
         it.el.style.transform = figureT;
         it.el.style.willChange = "transform";
         it.el.style.filter = blur > 0 ? `blur(${blur}px)` : "";
@@ -287,17 +304,15 @@ export function ChapterPage({ chapter }: { chapter: ShowcaseChapter }) {
 
     function apply(): void {
       raf = 0;
-      if (!mq.matches || !track || !strip) return;
-      const progress = max > 0 ? clamp01(-track.getBoundingClientRect().top / max) : 0;
-      const x = Math.round(-progress * max * 100) / 100;
-      // scroll speed -> motion blur (quantised, so it rarely repaints)
-      const dx = Number.isNaN(lastX) ? 0 : Math.abs(x - lastX);
-      smoothed = smoothed * 0.7 + clamp01(dx / 45) * 0.3;
+      const y = window.scrollY;
+      // scroll speed -> motion blur and stretch (quantised, so it rarely repaints)
+      const dy = Number.isNaN(lastY) ? 0 : Math.abs(y - lastY);
+      smoothed = smoothed * 0.7 + clamp01(dy / 45) * 0.3;
       const blur = smoothed < 0.04 ? 0 : Math.min(6, Math.round(smoothed * 7));
-      if (x !== lastX || blur > 0) {
-        lastX = x;
-        strip.style.transform = `translate3d(${x}px, 0, 0)`;
-        applyItems(x, blur);
+      if (y !== lastY || blur !== lastBlur) {
+        lastY = y;
+        lastBlur = blur;
+        applyItems(y, blur);
       }
       // keep easing the blur out after the scroll stops
       if (smoothed >= 0.04) schedule();
@@ -306,34 +321,25 @@ export function ChapterPage({ chapter }: { chapter: ShowcaseChapter }) {
       if (raf === 0) raf = requestAnimationFrame(apply);
     }
     const measure = (): void => {
-      if (!mq.matches) {
-        track.style.removeProperty("height");
-        strip.style.removeProperty("transform");
-        clearItems();
-        lastX = Number.NaN;
-        return;
-      }
+      const columnTop = column.getBoundingClientRect().top + window.scrollY;
       for (const it of items) {
-        it.left = it.el.offsetLeft;
-        it.width = it.el.offsetWidth;
+        it.top = columnTop + it.el.offsetTop;
+        it.height = it.el.offsetHeight;
       }
-      max = Math.max(0, strip.scrollWidth - window.innerWidth);
-      track.style.height = `${max + window.innerHeight}px`;
-      lastX = Number.NaN;
+      lastY = Number.NaN;
       schedule();
     };
 
     measure();
     const ro = new ResizeObserver(measure);
-    ro.observe(strip);
+    ro.observe(column);
     window.addEventListener("scroll", schedule, { passive: true });
     window.addEventListener("resize", measure);
-    mq.addEventListener("change", measure);
     return () => {
+      io?.disconnect();
       ro.disconnect();
       window.removeEventListener("scroll", schedule);
       window.removeEventListener("resize", measure);
-      mq.removeEventListener("change", measure);
       if (raf !== 0) cancelAnimationFrame(raf);
     };
   }, [chapter.slug]);
@@ -368,6 +374,7 @@ export function ChapterPage({ chapter }: { chapter: ShowcaseChapter }) {
     "--pd-btn-text": theme.btnText,
     "--pd-title": sizes.lg,
     "--pd-title-m": sizes.sm,
+    "--pd-col": "min(76vw, 1200px)",
   } as CSSProperties;
 
   return (
@@ -392,113 +399,103 @@ export function ChapterPage({ chapter }: { chapter: ShowcaseChapter }) {
         <span className="relative">Back</span>
       </button>
 
-      <div ref={trackRef} className="relative">
-        <div className="lg:sticky lg:top-0 lg:h-screen lg:overflow-hidden">
-          <div
-            ref={stripRef}
-            className="flex flex-col gap-[10vw] px-[var(--sc-pad-x)] pb-[12vw] pt-[26vw] lg:h-full lg:w-max lg:flex-row lg:items-center lg:gap-[5vw] lg:pb-0 lg:pt-[6vh] lg:will-change-transform"
+      <div
+        ref={columnRef}
+        className="relative mx-auto flex flex-col items-center gap-[10vw] px-[var(--sc-pad-x)] pb-[12vw] pt-[26vw] lg:gap-[11vh] lg:pb-[16vh] lg:pt-[19vh]"
+      >
+        <section className="pd-fx w-full lg:w-[var(--pd-col)]" style={{ "--pd-d": "0.1s" } as CSSProperties}>
+          <h1 className="m-0 text-[length:var(--pd-title-m)] font-medium leading-[0.95] tracking-[-0.02em] lg:max-w-[60vw] lg:text-[length:var(--pd-title)]">
+            {chapter.title}
+          </h1>
+          <p
+            className="mt-[1.5em] text-[0.75rem] uppercase leading-[1.3] lg:text-[0.8vw]"
+            style={{ color: "var(--pd-highlight)" }}
           >
-            <section className="pd-fx shrink-0 lg:w-[36vw]" style={{ "--pd-d": "0.1s" } as CSSProperties}>
-              <h1 className="m-0 text-[length:var(--pd-title-m)] font-medium leading-[0.95] tracking-[-0.02em] lg:text-[length:var(--pd-title)]">
-                {chapter.title}
-              </h1>
-              <p
-                className="mt-[1.5em] text-[0.75rem] uppercase leading-[1.3] lg:text-[0.8vw]"
-                style={{ color: "var(--pd-highlight)" }}
-              >
-                {chapter.tags.join(" • ")}
-              </p>
-              <p className="mt-[3em] hidden items-center gap-[0.6em] text-[0.75rem] uppercase lg:flex">
-                <span>Scroll to continue</span>
-                <svg aria-hidden="true" viewBox="0 0 16 16" className="h-[1em] w-[1em]">
-                  <path d="M2 8h11M9 4l4 4-4 4" fill="none" stroke="currentColor" strokeWidth="1.5" />
-                </svg>
-              </p>
-            </section>
+            {chapter.tags.join(" • ")}
+          </p>
+        </section>
 
-            {chapter.items.map((item, i) => (
-              <figure
-                key={i}
-                ref={i === 0 ? mainRef : undefined}
-                className={`m-0 w-full shrink-0 overflow-hidden rounded-[15px] lg:h-[62vh] lg:w-auto ${i > 0 ? "pd-fade" : ""}`}
-                style={{ aspectRatio: `${item.width} / ${item.height}`, "--pd-d": `${0.15 + i * 0.12}s` } as CSSProperties}
-              >
-                <Media item={item} picture={i === 0 ? chapterPicture(chapter) : mediaItemPicture(item)} priority={i < 2} />
-              </figure>
+        {chapter.items.map((item, i) => (
+          <figure
+            key={i}
+            ref={i === 0 ? mainRef : undefined}
+            className={`m-0 w-full shrink-0 overflow-hidden rounded-[15px] lg:w-[var(--pd-w)] ${i > 0 ? "pd-fade" : ""}`}
+            style={
+              {
+                aspectRatio: `${item.width} / ${item.height}`,
+                "--pd-d": `${0.15 + i * 0.12}s`,
+                "--pd-w": figureWidth(item),
+              } as CSSProperties
+            }
+          >
+            <Media item={item} picture={i === 0 ? chapterPicture(chapter) : mediaItemPicture(item)} priority={i < 2} />
+          </figure>
+        ))}
+
+        <section className="flex w-full flex-col lg:w-[min(var(--pd-col),46rem)]">
+          <div
+            ref={textRef}
+            className="sc-rise sc-text max-w-[30em] text-[4.2vw] leading-[1.5] lg:max-w-none lg:text-[1.2vw] lg:leading-[1.55]"
+            data-audio={chapter.audioUrl ? "" : undefined}
+          >
+            {chapter.paragraphs.map((p, i) => (
+              <p key={i} className={i === 0 ? "m-0" : "mt-[1em]"}>
+                {chapter.audioUrl ? <Words text={p} /> : p}
+              </p>
             ))}
-
-            <section className="shrink-0 lg:w-[46vw]">
-              <div
-                ref={textRef}
-                className="sc-text max-w-[30em] text-[4.2vw] leading-[1.5] lg:text-[1.2vw]"
-                data-audio={chapter.audioUrl ? "" : undefined}
-              >
-                {chapter.paragraphs.map((p, i) => (
-                  <p key={i} className={i === 0 ? "m-0" : "mt-[1em]"}>
-                    {chapter.audioUrl ? <Words text={p} /> : p}
-                  </p>
-                ))}
-                {chapter.audioUrl && <audio ref={audioRef} src={chapter.audioUrl} preload="none" />}
-              </div>
-
-              <a
-                href={next ? next.href : "#/"}
-                className="group relative mt-[3em] flex h-[3.375em] w-fit items-center gap-[1.1em] overflow-hidden rounded-full pl-[1.1em] pr-[1.5em] text-[0.875rem] font-medium uppercase no-underline"
-                style={{ background: "var(--pd-btn-bg)", color: "var(--pd-btn-text)" }}
-              >
-                <span
-                  aria-hidden="true"
-                  className="z-[1] block h-[0.5em] w-[0.5em] rounded-full transition-transform duration-[400ms] ease-[cubic-bezier(.35,0,0,1)] group-hover:translate-x-[5em] group-hover:scale-[26]"
-                  style={{ background: "var(--pd-btn-text)" }}
-                />
-                <span className="relative z-[2] transition-colors duration-500 group-hover:[color:var(--pd-text)]">
-                  {next ? "Next chapter" : "All chapters"}
-                </span>
-              </a>
-
-              <div className="mt-[4em] grid grid-cols-2 gap-[4vw] text-[4vw] leading-[1.4] lg:text-[1vw]">
-                <div>
-                  <h4
-                    className="m-0 mb-[1em] text-[0.8em] font-normal uppercase"
-                    style={{ color: "var(--pd-highlight)" }}
-                  >
-                    Chapter
-                  </h4>
-                  <div>
-                    {chapter.index + 1} of {total}
-                  </div>
-                </div>
-                <div>
-                  <h4
-                    className="m-0 mb-[1em] text-[0.8em] font-normal uppercase"
-                    style={{ color: "var(--pd-highlight)" }}
-                  >
-                    Navigate
-                  </h4>
-                  {prev && (
-                    <div>
-                      <a href={prev.href} className="underline-offset-4 hover:underline">
-                        Previous: {prev.title}
-                      </a>
-                    </div>
-                  )}
-                  {next && (
-                    <div>
-                      <a href={next.href} className="underline-offset-4 hover:underline">
-                        Next: {next.title}
-                      </a>
-                    </div>
-                  )}
-                  <div>
-                    <a href="#/" className="underline-offset-4 hover:underline">
-                      All chapters
-                    </a>
-                  </div>
-                </div>
-              </div>
-            </section>
+            {chapter.audioUrl && <audio ref={audioRef} src={chapter.audioUrl} preload="none" />}
           </div>
-        </div>
+
+          <a
+            href={next ? next.href : "#/"}
+            className="sc-rise group relative mt-[3em] flex h-[3.375em] w-fit items-center gap-[1.1em] overflow-hidden rounded-full pl-[1.1em] pr-[1.5em] text-[0.875rem] font-medium uppercase no-underline"
+            style={{ background: "var(--pd-btn-bg)", color: "var(--pd-btn-text)" }}
+          >
+            <span
+              aria-hidden="true"
+              className="z-[1] block h-[0.5em] w-[0.5em] rounded-full transition-transform duration-[400ms] ease-[cubic-bezier(.35,0,0,1)] group-hover:translate-x-[5em] group-hover:scale-[26]"
+              style={{ background: "var(--pd-btn-text)" }}
+            />
+            <span className="relative z-[2] transition-colors duration-500 group-hover:[color:var(--pd-text)]">
+              {next ? "Next chapter" : "All chapters"}
+            </span>
+          </a>
+
+          <div className="sc-rise mt-[4em] grid grid-cols-2 gap-[4vw] text-[4vw] leading-[1.4] lg:gap-[2vw] lg:text-[1vw]">
+            <div>
+              <h4 className="m-0 mb-[1em] text-[0.8em] font-normal uppercase" style={{ color: "var(--pd-highlight)" }}>
+                Chapter
+              </h4>
+              <div>
+                {chapter.index + 1} of {total}
+              </div>
+            </div>
+            <div>
+              <h4 className="m-0 mb-[1em] text-[0.8em] font-normal uppercase" style={{ color: "var(--pd-highlight)" }}>
+                Navigate
+              </h4>
+              {prev && (
+                <div>
+                  <a href={prev.href} className="underline-offset-4 hover:underline">
+                    Previous: {prev.title}
+                  </a>
+                </div>
+              )}
+              {next && (
+                <div>
+                  <a href={next.href} className="underline-offset-4 hover:underline">
+                    Next: {next.title}
+                  </a>
+                </div>
+              )}
+              <div>
+                <a href="#/" className="underline-offset-4 hover:underline">
+                  All chapters
+                </a>
+              </div>
+            </div>
+          </div>
+        </section>
       </div>
     </div>
   );

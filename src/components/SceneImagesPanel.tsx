@@ -2,8 +2,10 @@
 
 /**
  * Per-chapter scene image status with retry/regenerate (stage S4, docs/DOMAINS_PLAN.md).
- * Renders nothing when the project has no domain avatar or the database isn't
- * migrated (the project payload then has no domainAvatarId).
+ * Avatar mode (default): renders nothing when the project has no domain avatar or the
+ * database isn't migrated (the project payload then has no domainAvatarId).
+ * Lead mode (Showcase): the fixed lead character is the reference, so no avatar is needed;
+ * images are generated chapter by chapter, in order, as soon as the project has chapters.
  */
 import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
@@ -13,6 +15,8 @@ export interface SceneImagesPanelProps {
   projectId: string;
   /** Start generating missing images automatically on mount (used once a domain avatar is chosen). */
   autoStart?: boolean;
+  /** "avatar" (default): domain-avatar scenes. "lead": fixed lead character scenes (Showcase), no avatar required. */
+  mode?: "avatar" | "lead";
   /** Called after any image changed so the page can reload the project. */
   onChanged?(): void;
 }
@@ -21,6 +25,7 @@ interface RunBody {
   onlyMissing?: boolean;
   retryFailed?: boolean;
   chunkId?: string;
+  mode?: "lead";
 }
 
 interface RunResponse {
@@ -44,7 +49,8 @@ function Spinner() {
   );
 }
 
-export default function SceneImagesPanel({ projectId, autoStart, onChanged }: SceneImagesPanelProps) {
+export default function SceneImagesPanel({ projectId, autoStart, mode = "avatar", onChanged }: SceneImagesPanelProps) {
+  const lead = mode === "lead";
   const [chunks, setChunks] = useState<Chunk[] | null>(null);
   const [hasAvatar, setHasAvatar] = useState(false);
   const [running, setRunning] = useState(false);
@@ -67,6 +73,12 @@ export default function SceneImagesPanel({ projectId, autoStart, onChanged }: Sc
         setHasAvatar(false);
         return null;
       }
+      // Lead mode needs no avatar: the fixed character is the reference.
+      if (lead) {
+        setHasAvatar(true);
+        setChunks(data.project.chunks);
+        return data.project.chunks;
+      }
       const project = data.project;
       const chosen =
         Boolean(project.domainAvatarId) || (project.selectedAvatarIds ?? []).some((avatarId) => avatarId.startsWith("domain:"));
@@ -77,12 +89,13 @@ export default function SceneImagesPanel({ projectId, autoStart, onChanged }: Sc
       setHasAvatar(false);
       return null;
     }
-  }, [projectId]);
+  }, [projectId, lead]);
 
   /** Calls the route until nothing remains. Never throws; problems are shown in the panel. */
   const run = useCallback(
     async (initial: RunBody, total: number) => {
-      let body = initial;
+      const withMode = (next: RunBody): RunBody => (lead ? { ...next, mode: "lead" } : next);
+      let body = withMode(initial);
       if (runningRef.current) return;
       runningRef.current = true;
       setRunning(true);
@@ -115,7 +128,7 @@ export default function SceneImagesPanel({ projectId, autoStart, onChanged }: Sc
           await load();
           // After the first call, only fill in what is still missing (a plain "all" run must not start over).
           if (body.chunkId) break;
-          body = body.retryFailed && !body.onlyMissing ? { retryFailed: true } : { onlyMissing: true };
+          body = withMode(body.retryFailed && !body.onlyMissing ? { retryFailed: true } : { onlyMissing: true });
           if (!data.remaining || results.length === 0) break;
         }
       } catch (err) {
@@ -129,7 +142,7 @@ export default function SceneImagesPanel({ projectId, autoStart, onChanged }: Sc
         if (changed) onChangedRef.current?.();
       }
     },
-    [projectId, load]
+    [projectId, load, lead]
   );
 
   useEffect(() => {
@@ -159,7 +172,7 @@ export default function SceneImagesPanel({ projectId, autoStart, onChanged }: Sc
           <h2 className="text-sm font-semibold text-neutral-900 dark:text-white">Chapter scene images</h2>
           <p className="text-xs text-neutral-500 dark:text-indigo-200/60">
             {ready} of {chunks.length} ready
-            {failed > 0 ? ` · ${failed} failed (those chapters show the avatar)` : ""}
+            {failed > 0 ? ` · ${failed} failed${lead ? "" : " (those chapters show the avatar)"}` : ""}
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
@@ -241,7 +254,9 @@ export default function SceneImagesPanel({ projectId, autoStart, onChanged }: Sc
                     : chunk.imageStatus === "pending"
                       ? "Generating..."
                       : chunk.imageStatus === "failed"
-                        ? "Failed: uses the avatar instead"
+                        ? lead
+                          ? "Failed: retry to try again"
+                          : "Failed: uses the avatar instead"
                         : "Not generated yet"}
                 </p>
               </div>

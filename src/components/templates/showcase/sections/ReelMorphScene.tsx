@@ -321,6 +321,9 @@ export function ReelMorphScene({ trackRef, picture, avatarImage, avatarVideo, av
     if (!source) {
       if (picture) {
         const img = new Image();
+        // drawn into a canvas that feeds the 3D scene: a cross-origin scene image must be CORS-readable
+        // (otherwise it simply never loads and the generated scene stays)
+        img.crossOrigin = "anonymous";
         img.decoding = "async";
         img.onload = () => {
           photo = img;

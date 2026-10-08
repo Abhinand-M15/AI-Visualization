@@ -11,6 +11,10 @@ import { SHOWCASE_CSS } from "@/lib/showcaseCss";
  * `npm run build:showcase`), plus its stylesheet. The publish route copies those
  * files, the fonts and the UI sounds into the deploy bundle (showcaseAssetPaths).
  *
+ * Scene images and the company logo are shown from the deploy bundle (relative paths
+ * the publish route has already put in `chunk.imageUrl` and `project.logoUrl`); the
+ * header draws the logo itself, so renderStaticSite does not inject it a second time.
+ *
  * The page links to nothing outside itself: no CDN scripts, no web fonts, no
  * link back to the generator. Narration audio is the only cross-origin request
  * (the Supabase public URLs).
@@ -49,6 +53,8 @@ export function renderShowcase(project: Project, avatars: Avatar[], supabaseUrl:
     audioUrl: (chunk) => chunkAudioUrl(supabaseUrl, project.id, chunk),
     assetUrl: bundlePath,
     assetBase: bundlePath(SHOWCASE_ASSET_ROOT),
+    // chunk.imageUrl and project.logoUrl are already bundle-relative (the publish route bundles them)
+    logoUrl: project.logoUrl,
   });
   const base = bundlePath(SHOWCASE_ASSET_ROOT);
 

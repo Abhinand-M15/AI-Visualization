@@ -82,3 +82,11 @@ export function extensionForMime(mimeType: string): string {
   if (m.includes("webp")) return "webp";
   return "png";
 }
+
+export type ReferenceImage = { mimeType: string; data: Buffer };
+
+/** The references of a request in order: referenceImages when non-empty, else the single referenceImage. */
+export function collectReferences(opts: { referenceImage?: ReferenceImage; referenceImages?: ReferenceImage[] }): ReferenceImage[] {
+  if (opts.referenceImages && opts.referenceImages.length > 0) return opts.referenceImages;
+  return opts.referenceImage ? [opts.referenceImage] : [];
+}

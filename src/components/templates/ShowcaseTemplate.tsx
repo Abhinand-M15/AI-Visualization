@@ -16,7 +16,7 @@ const mono = IBM_Plex_Mono({ subsets: ["latin"], weight: ["400", "500"], variabl
  * opens as its own page. Everything lives in ./showcase/ShowcaseApp, which also
  * powers the published site, so the preview and the live page behave the same.
  */
-export default function ShowcaseTemplate({ title, chunks, avatars }: TemplateProps) {
-  const story = useMemo(() => buildShowcaseStory({ title, chunks, avatars }), [title, chunks, avatars]);
+export default function ShowcaseTemplate({ title, chunks, avatars, logoUrl }: TemplateProps) {
+  const story = useMemo(() => buildShowcaseStory({ title, chunks, avatars, logoUrl }), [title, chunks, avatars, logoUrl]);
   return <ShowcaseApp story={story} className={`${sans.variable} ${mono.variable}`} />;
 }

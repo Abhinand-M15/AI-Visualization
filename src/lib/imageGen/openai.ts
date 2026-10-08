@@ -1,10 +1,10 @@
 /**
  * OpenAI image generation: /v1/images/generations, or /v1/images/edits (multipart, image[])
- * when a reference image is given. Reads data[0].b64_json.
+ * when reference image(s) are given (several image[] parts, in order). Reads data[0].b64_json.
  */
 import type { ImageGenerator } from "./types";
 import { openaiImageModel } from "./constants";
-import { ImageGenerationError, errorDetail, extensionForMime, fetchWithRetry } from "./http";
+import { ImageGenerationError, collectReferences, errorDetail, extensionForMime, fetchWithRetry } from "./http";
 
 type GenerateOpts = Parameters<ImageGenerator["generate"]>[0];
 
@@ -38,19 +38,21 @@ export function createOpenAIImageGenerator(apiKey: string): ImageGenerator {
     async generate(opts) {
       const model = openaiImageModel();
       const size = openaiSize(opts.aspect);
-      const ref = opts.referenceImage;
-      const url = `https://api.openai.com/v1/images/${ref ? "edits" : "generations"}`;
+      const refs = collectReferences(opts);
+      const url = `https://api.openai.com/v1/images/${refs.length > 0 ? "edits" : "generations"}`;
       const res = await fetchWithRetry("OpenAI", url, (): RequestInit => {
-        if (ref) {
+        if (refs.length > 0) {
           const form = new FormData();
           form.set("model", model);
           form.set("prompt", opts.prompt);
           form.set("size", size);
-          form.append(
-            "image[]",
-            new Blob([new Uint8Array(ref.data)], { type: ref.mimeType }),
-            `reference.${extensionForMime(ref.mimeType)}`
-          );
+          refs.forEach((ref, index) => {
+            form.append(
+              "image[]",
+              new Blob([new Uint8Array(ref.data)], { type: ref.mimeType }),
+              `reference-${index + 1}.${extensionForMime(ref.mimeType)}`
+            );
+          });
           return { method: "POST", headers: { authorization: `Bearer ${apiKey}` }, body: form };
         }
         return {

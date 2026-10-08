@@ -61,8 +61,53 @@ function menuFontSize(count: number): { desktop: string; mobile: string } {
   return { desktop: "2vw", mobile: "5vw" };
 }
 
+/**
+ * Whether a transparent logo is mostly light (white or pale), so it can sit on a dark
+ * plate; anything dark, opaque or unreadable gets the light plate. Sampled from a
+ * small canvas copy; a cross-origin file without CORS headers simply stays "dark".
+ */
+function useLogoTone(src: string | undefined): "light" | "dark" {
+  const [tone, setTone] = useState<"light" | "dark">("dark");
+  useEffect(() => {
+    if (!src) return;
+    let cancelled = false;
+    const probe = new Image();
+    probe.crossOrigin = "anonymous";
+    probe.onload = () => {
+      try {
+        const w = 64;
+        const h = Math.max(1, Math.round((probe.naturalHeight / Math.max(1, probe.naturalWidth)) * w));
+        const canvas = document.createElement("canvas");
+        canvas.width = w;
+        canvas.height = h;
+        const ctx = canvas.getContext("2d");
+        if (!ctx) return;
+        ctx.drawImage(probe, 0, 0, w, h);
+        const data = ctx.getImageData(0, 0, w, h).data;
+        let seen = 0;
+        let sum = 0;
+        for (let i = 0; i < data.length; i += 4) {
+          if (data[i + 3] < 40) continue;
+          seen += 1;
+          sum += (0.2126 * data[i] + 0.7152 * data[i + 1] + 0.0722 * data[i + 2]) / 255;
+        }
+        const coverage = seen / (w * h);
+        if (!cancelled && seen > 0 && coverage < 0.9 && sum / seen > 0.62) setTone("light");
+      } catch {
+        // tainted canvas: keep the light plate
+      }
+    };
+    probe.src = src;
+    return () => {
+      cancelled = true;
+    };
+  }, [src]);
+  return tone;
+}
+
 export function Header() {
   const { story, router } = useShowcase();
+  const logoTone = useLogoTone(story.logoUrl);
   const [open, setOpen] = useState(false);
   const [soundOn, setSoundOn] = useState(soundPreference);
   const soundOnRef = useRef(soundPreference);
@@ -141,14 +186,36 @@ export function Header() {
         <a
           href="#/"
           title={story.title}
-          className="min-w-0 max-w-[46vw] truncate text-[1.8vw] font-medium uppercase leading-none tracking-tight max-md:text-[5vw]"
+          aria-label={story.logoUrl ? story.title : undefined}
+          className={
+            story.logoUrl
+              ? "flex min-w-0 max-w-[46vw] items-center"
+              : "min-w-0 max-w-[46vw] truncate text-[1.8vw] font-medium uppercase leading-none tracking-tight max-md:text-[5vw]"
+          }
           onClick={() => {
             play("click");
             setOpen(false);
           }}
           {...hoverProps}
         >
-          {story.title}
+          {story.logoUrl ? (
+            // The company logo stands in for the wordmark, on a subtle plate (light for a dark logo, dark for a pale one) so it reads on every page.
+            <span
+              className={`flex items-center rounded-[10px] px-[10px] py-[6px] shadow-[0_2px_10px_rgba(0,0,0,.18)] ring-1 ${
+                logoTone === "light" ? "bg-[#0b0d18]/85 ring-white/15" : "bg-white/90 ring-black/10"
+              }`}
+            >
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img
+                src={story.logoUrl}
+                alt={story.title}
+                draggable={false}
+                className="block h-[clamp(26px,2.8vw,44px)] w-auto max-w-[40vw] object-contain max-md:h-[26px] max-md:max-w-[20vw]"
+              />
+            </span>
+          ) : (
+            story.title
+          )}
         </a>
 
         <div className="flex shrink-0 items-center gap-[0.5em] text-base max-md:text-[.9rem]">

@@ -57,6 +57,16 @@ html.pt-leaving .fw-row[data-col="1"]:not([data-pt-active]) .fw-main {
 .pd-fade {
   transition: opacity 1s ease var(--pd-d, 0s);
 }
+/* chapter page blocks rise into place from below as they scroll into view */
+.sc-rise {
+  opacity: 0;
+  transform: translate3d(0, 56px, 0);
+  transition: opacity 0.9s ease, transform 1.1s cubic-bezier(0.16, 1, 0.3, 1);
+}
+.sc-rise.sc-in {
+  opacity: 1;
+  transform: none;
+}
 html[data-pt-hold] .pd-fx {
   opacity: 0;
   transform: translate3d(0, 32px, 0);
@@ -113,7 +123,7 @@ html[data-pt-back] .fw-media {
 .sc-root .nd-dock { z-index: 60; }
 
 @media (prefers-reduced-motion: reduce) {
-  .fw-head, .fw-foot, .fw-main, .pd-fx, .pd-fade { transition: none; }
+  .fw-head, .fw-foot, .fw-main, .pd-fx, .pd-fade, .sc-rise { transition: none; }
   .sc-text[data-audio] .sc-word { transition: none; }
 }
 `;

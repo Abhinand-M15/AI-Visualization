@@ -856,8 +856,14 @@ export default function ProjectPage({ params }: { params: Promise<{ id: string }
               />
             )}
 
-            {domainId && selectedAvatarIds.some((existing) => existing.startsWith("domain:")) && (
-              <SceneImagesPanel projectId={id} autoStart onChanged={() => void reloadAfterImages()} />
+            {selectedTemplateId === "showcase" ? (
+              // Showcase: one fixed lead character in every scene (no avatar choice needed).
+              <SceneImagesPanel projectId={id} mode="lead" autoStart onChanged={() => void reloadAfterImages()} />
+            ) : (
+              domainId &&
+              selectedAvatarIds.some((existing) => existing.startsWith("domain:")) && (
+                <SceneImagesPanel projectId={id} autoStart onChanged={() => void reloadAfterImages()} />
+              )
             )}
 
             <ProjectLogoControl projectId={id} logoUrl={logoUrl} onChanged={setLogoUrl} />

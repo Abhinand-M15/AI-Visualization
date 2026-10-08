@@ -14,6 +14,8 @@ export interface Domain {
   slug: string;
   name: string;
   outfitDescription: string;
+  /** Where the company logo goes on the lead character (domains.logo_placement, migration 004); "" when absent. */
+  logoPlacement: string;
   storyGuidance: string;
   sortOrder: number;
   active: boolean;
@@ -29,12 +31,15 @@ function isNotMigrated(error: { code?: string; message?: string } | null | undef
 }
 
 const DOMAIN_COLUMNS = "id, slug, name, outfit_description, story_guidance, sort_order, active";
+/** Includes logo_placement (migration 004); callers fall back to DOMAIN_COLUMNS while it is not applied. */
+const DOMAIN_COLUMNS_WITH_PLACEMENT = `${DOMAIN_COLUMNS}, logo_placement`;
 
 interface DomainRow {
   id: string;
   slug: string;
   name: string;
   outfit_description: string | null;
+  logo_placement?: string | null;
   story_guidance: string | null;
   sort_order: number | null;
   active: boolean | null;
@@ -46,6 +51,7 @@ function toDomain(row: DomainRow): Domain {
     slug: row.slug,
     name: row.name,
     outfitDescription: row.outfit_description ?? "",
+    logoPlacement: row.logo_placement ?? "",
     storyGuidance: row.story_guidance ?? "",
     sortOrder: row.sort_order ?? 0,
     active: row.active ?? true,
@@ -67,19 +73,22 @@ export async function listDomains(): Promise<Domain[]> {
   return ((data ?? []) as DomainRow[]).map(toDomain);
 }
 
-/** One domain by id (active or not), or null when missing / table missing. */
+/** One domain by id (active or not), or null when missing / table missing. Works before migration 004 (logoPlacement is then ""). */
 export async function getDomain(id: string): Promise<Domain | null> {
   if (!id) return null;
-  const { data, error } = await getSupabase().from("domains").select(DOMAIN_COLUMNS).eq("id", id).maybeSingle();
+  const read = (columns: string) => getSupabase().from("domains").select(columns).eq("id", id).maybeSingle();
+  let { data, error } = await read(DOMAIN_COLUMNS_WITH_PLACEMENT);
+  // logo_placement missing (migration 004 not applied): read without it.
+  if (error && isNotMigrated(error)) ({ data, error } = await read(DOMAIN_COLUMNS));
   if (error) {
     // A malformed uuid (22P02) can't match any domain either.
     if (isNotMigrated(error) || error.code === "22P02") return null;
     throw new Error(`Could not read domain: ${error.message}`);
   }
-  return data ? toDomain(data as DomainRow) : null;
+  return data ? toDomain(data as unknown as DomainRow) : null;
 }
 
-/** Prompt body by key ('avatar_character' | 'chapter_scene' | 'story_domain_guidance'). Service role; null when missing. */
+/** Prompt body by key (e.g. 'avatar_character', 'chapter_scene', 'lead_scene_image'). Service role; null when missing. */
 export async function getPrompt(key: string): Promise<string | null> {
   const { data, error } = await getSupabase().from("prompt_templates").select("body").eq("key", key).maybeSingle();
   if (error) {

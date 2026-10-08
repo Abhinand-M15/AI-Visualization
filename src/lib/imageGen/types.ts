@@ -14,6 +14,11 @@ export interface ImageGenerator {
     prompt: string;
     /** When given, the model is asked to keep the same character as this image. */
     referenceImage?: { mimeType: string; data: Buffer };
+    /**
+     * Several references (e.g. character first, company logo second). When non-empty it
+     * takes precedence over referenceImage; order is kept.
+     */
+    referenceImages?: { mimeType: string; data: Buffer }[];
     aspect?: "16:9" | "1:1" | "3:4";
   }): Promise<{ mimeType: string; data: Buffer }>;
 }

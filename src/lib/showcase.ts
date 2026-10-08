@@ -21,7 +21,12 @@ const asset = (file: string) => `${SHOWCASE_ASSET_ROOT}/${file}`;
 export const SHOWCASE_SOUNDS = ["click", "focus", "glass", "hover", "page"] as const;
 export type ShowcaseSound = (typeof SHOWCASE_SOUNDS)[number];
 
-/** Every public file the published site must ship for this template. */
+/**
+ * Every public file of the template itself that the published site must ship. The
+ * per-story files (scene images, the company logo) are not listed: the publish route
+ * downloads them into the bundle (scene-images/, logo/) and renderStaticSite points
+ * the page at those relative paths.
+ */
 export function showcaseAssetPaths(): string[] {
   return [
     asset("showcase.js"),
@@ -63,6 +68,8 @@ export interface ShowcaseMediaItem {
   overlay?: string;
   videoSrc?: string;
   videoFallback?: string;
+  /** CSS object-position of `image` (which part of a wide scene image a narrow frame shows). */
+  focus?: string;
   alt: string;
 }
 
@@ -82,9 +89,9 @@ export interface ShowcaseChapter {
   /** A short summary (the first couple of sentences). */
   summary: string;
   audioUrl?: string;
-  /** SCENE IMAGE SLOT: set this to a picture URL to replace the generated art
-   *  for this chapter's tile, page and (first chapter) reel card. Nothing sets it
-   *  yet; generated scene images can be dropped in here later. */
+  /** The chapter's AI-generated scene image (from `chunk.imageUrl`). When set it
+   *  replaces the generated art on the tile, the page's art-only pictures and (first
+   *  chapter) the reel card; unset chapters keep the generated abstract art. */
   imageUrl?: string;
   /** The avatar's emotion image for this chapter (transparent PNG). */
   avatarImage?: string;
@@ -100,6 +107,8 @@ export interface ShowcaseStory {
   narrated: boolean;
   /** Where the UI sounds live: "/themes/showcase" in the app, relative when published. */
   assetBase: string;
+  /** The company logo (public URL, or a bundle-relative path when published), shown in the header. */
+  logoUrl?: string;
 }
 
 const MOOD_LABEL: Record<EmotionKey, string> = {
@@ -203,6 +212,8 @@ export interface BuildShowcaseOptions {
   /** Maps a public path ("/avatars/x.png") to the URL the page should use. */
   assetUrl?: (publicPath: string) => string;
   assetBase?: string;
+  /** The company logo; shown in the header in place of the wordmark. */
+  logoUrl?: string;
 }
 
 export function buildShowcaseStory(options: BuildShowcaseOptions): ShowcaseStory {
@@ -228,9 +239,13 @@ export function buildShowcaseStory(options: BuildShowcaseOptions): ShowcaseStory
     const fallbackPath = videoPath ? avatarVideoFallbackUrl(videoPath) : undefined;
 
     const alt = (n: number) => `${chunk.title} picture ${n}`;
+    // The scene image fills the art-only pictures of the page (the ones without an avatar
+    // on them), each framed on a different part of it; the avatar pictures keep their art.
+    const sceneUrl = chunk.imageUrl ? url(chunk.imageUrl) : undefined;
+    const scene = (focus: string) => (sceneUrl ? { image: sceneUrl, focus } : {});
     const items: ShowcaseMediaItem[] = [
       // The first item keeps the tile's aspect ratio: the tile morphs into it.
-      { kind: "image", width: 1600, height: 1040, hue, seed: index * 7 + 1, alt: alt(1) },
+      { kind: "image", width: 1600, height: 1040, hue, seed: index * 7 + 1, ...scene("50% 50%"), alt: alt(1) },
     ];
     if (poseImage) {
       items.push({ kind: "image", width: 1080, height: 1350, hue: (hue + 28) % 360, seed: index * 7 + 2, overlay: poseImage, alt: alt(2) });
@@ -246,7 +261,7 @@ export function buildShowcaseStory(options: BuildShowcaseOptions): ShowcaseStory
       ...(videoPath ? { videoSrc: url(videoPath), ...(fallbackPath ? { videoFallback: url(fallbackPath) } : {}) } : altImage ? { overlay: altImage } : {}),
       alt: alt(3),
     });
-    items.push({ kind: "image", width: 1080, height: 1440, hue: (hue + 60) % 360, seed: index * 7 + 4, alt: alt(4) });
+    items.push({ kind: "image", width: 1080, height: 1440, hue: (hue + 60) % 360, seed: index * 7 + 4, ...scene("42% 50%"), alt: alt(4) });
     items.push({
       kind: "image",
       width: 1600,
@@ -256,7 +271,7 @@ export function buildShowcaseStory(options: BuildShowcaseOptions): ShowcaseStory
       ...(altImage ? { overlay: altImage } : {}),
       alt: alt(5),
     });
-    items.push({ kind: "image", width: 2000, height: 1000, hue: (hue + 90) % 360, seed: index * 7 + 6, alt: alt(6) });
+    items.push({ kind: "image", width: 2000, height: 1000, hue: (hue + 90) % 360, seed: index * 7 + 6, ...scene("60% 50%"), alt: alt(6) });
 
     return {
       index,
@@ -269,6 +284,7 @@ export function buildShowcaseStory(options: BuildShowcaseOptions): ShowcaseStory
       paragraphs: showcaseParagraphs(chunk.narrativeText),
       summary: showcaseSummary(chunk.narrativeText),
       audioUrl: audioOf(chunk),
+      imageUrl: sceneUrl,
       avatarImage: poseImage,
       avatarVideo: videoPath ? url(videoPath) : undefined,
       avatarVideoFallback: fallbackPath ? url(fallbackPath) : undefined,
@@ -281,6 +297,7 @@ export function buildShowcaseStory(options: BuildShowcaseOptions): ShowcaseStory
     chapters,
     narrated: chapters.some((chapter) => Boolean(chapter.audioUrl)),
     assetBase: options.assetBase ?? SHOWCASE_ASSET_ROOT,
+    ...(options.logoUrl ? { logoUrl: options.logoUrl } : {}),
   };
 }
 
