@@ -63,12 +63,14 @@ cp .env.local.example .env.local        # Windows PowerShell: Copy-Item .env.loc
 npm run dev                             # http://localhost:3000
 ```
 
-Verify the setup (all must pass):
+Verify the setup (both must pass; **run the build first**: on a fresh clone `npx tsc --noEmit` alone fails with "Cannot find name 'LayoutProps'" until Next has generated its types, which `npm run build` or `npm run dev` does):
 
 ```bash
-npx tsc --noEmit
 npm run build
+npx tsc --noEmit
 ```
+
+This was tested on 13 Oct 2026 from a clean clone with no `.env.local`: install, build and then type-check all passed.
 
 Notes:
 - `npm run lint` shows about 13 old errors in untouched legacy files (`AudioPlayer`, `ThemeProvider`, `AvatarDisplay`, `avatar-3d`, `lunar-gravity-card`, `reactive-mouth-overlay`, `case-study-preview`). They predate this work and do not block the build. Do not chase them unless you are editing those files.
