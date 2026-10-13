@@ -296,6 +296,7 @@ Known issues and limits:
 
 ## 14. Documents in this repo
 
+- `NEW_LAPTOP_SETUP.md`: the setup procedure for a new machine and the ready-made prompt to give an AI assistant there.
 - `AGENTS.md`, `CLAUDE.md`: instructions for AI assistants (Next 16 warning; `CLAUDE.md` imports this file).
 - `docs/ACCOUNTS_PLAN.md`: accounts, keys, uploads, publishing contract.
 - `docs/DOMAINS_PLAN.md`: domains, avatars, scene images, logo contract.
