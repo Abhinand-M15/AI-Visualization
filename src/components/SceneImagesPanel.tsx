@@ -10,6 +10,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import type { Chunk, Project } from "@/lib/types";
+import { applySectionImages, caseStudySectionsAsChunks, flattenCaseStudySections } from "@/lib/caseStudySections";
 
 export interface SceneImagesPanelProps {
   projectId: string;
@@ -75,9 +76,17 @@ export default function SceneImagesPanel({ projectId, autoStart, mode = "avatar"
       }
       // Lead mode needs no avatar: the fixed character is the reference.
       if (lead) {
+        // A case study is drawn per bound section (ids `case-study-<key>`), the same list the page shows.
+        const list =
+          data.project.documentType === "case-study"
+            ? applySectionImages(
+                caseStudySectionsAsChunks(flattenCaseStudySections(data.project.caseStudyBinding?.slots ?? null), undefined),
+                data.project.sectionImages
+              )
+            : data.project.chunks;
         setHasAvatar(true);
-        setChunks(data.project.chunks);
-        return data.project.chunks;
+        setChunks(list);
+        return list;
       }
       const project = data.project;
       const chosen =

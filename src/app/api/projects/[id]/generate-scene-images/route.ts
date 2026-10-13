@@ -8,6 +8,7 @@ import { getImageGeneratorFor, type ImageGenerator } from "@/lib/imageGen/types"
 import {
   assetBaseUrl,
   buildDirectorPrompt,
+  batchTargets,
   buildImagePrompt,
   createGeminiTextGenerate,
   decodeBrief,
@@ -17,10 +18,17 @@ import {
   loadCharacterReference,
   loadLeadPrompts,
   loadLogoReference,
+  loadSheetOutfit,
+  loadSheetPrompts,
   logoSendable,
+  runSheetBatch,
+  SHEET_SIZE,
+  withTimeout,
   type LeadContext,
   type SceneBrief,
 } from "@/lib/leadCharacter";
+import { caseStudySectionsAsChunks, flattenCaseStudySections } from "@/lib/caseStudySections";
+import type { Chunk } from "@/lib/types";
 import { DOMAIN_AVATAR_PREFIX } from "@/lib/domainAvatars";
 import { backupAfterUpload } from "@/lib/backupAfterUpload";
 import { withRetry } from "@/lib/concurrency";
@@ -64,14 +72,6 @@ function errorJson(error: string, code: string, status: number) {
 
 function messageOf(error: unknown): string {
   return (error instanceof Error ? error.message : String(error)).slice(0, 500);
-}
-
-function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
-  let timer: ReturnType<typeof setTimeout>;
-  const timeout = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => reject(new Error(`${label} timed out after ${Math.round(ms / 1000)} s.`)), ms);
-  });
-  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }
 
 type Supa = ReturnType<typeof getSupabase>;
@@ -138,8 +138,15 @@ type Project = ReturnType<typeof rowToProject>;
  * [character, logo?] references. The director's brief is saved in chapter_images.prompt_used
  * (JSON, see leadCharacter.ts) so the next chapter gets it as {{previous_scene}}.
  */
-async function generateLeadScenes(args: { request: Request; user: AppUser | null; project: Project; body: Body }): Promise<Response> {
-  const { request, user, project, body } = args;
+async function generateLeadScenes(args: {
+  request: Request;
+  user: AppUser | null;
+  project: Project;
+  /** The scenes to draw, in order: the project's chunks, or a case study's sections (ids `case-study-<key>`). */
+  chunks: Chunk[];
+  body: Body;
+}): Promise<Response> {
+  const { request, user, project, chunks, body } = args;
   const id = project.id;
   const supabase = getSupabase();
   try {
@@ -148,7 +155,7 @@ async function generateLeadScenes(args: { request: Request; user: AppUser | null
     if (fields.domainId && !domain) return errorJson("This project's domain could not be found.", "unknown_domain", 400);
 
     const rows = await loadChapterImageRows(id);
-    const { targets, inProgress } = selectSceneTargets(project.chunks, rows, body);
+    const { targets, inProgress } = selectSceneTargets(chunks, rows, body);
     if (targets.length === 0) {
       return Response.json({ results: [], remaining: 0, ...(inProgress.length > 0 ? { inProgress: inProgress.length } : {}) });
     }
@@ -169,7 +176,7 @@ async function generateLeadScenes(args: { request: Request; user: AppUser | null
       domain,
       prompts,
       hasLogo: Boolean(logo),
-      chapterTotal: project.chunks.length,
+      chapterTotal: chunks.length,
     };
     const references = logo && logoSendable(ctx) ? [character, logo] : [character];
 
@@ -180,66 +187,119 @@ async function generateLeadScenes(args: { request: Request; user: AppUser | null
       if (brief) briefs.set(row.chunk_id, brief);
     }
 
+    // Contact sheets: every full group of four targets is ONE image cropped into four (the free Cloudflare
+    // allowance and one consistent style). A leftover group of 1-3 and any explicit single regenerate use the
+    // single-image path. Without the sheet prompts (migration 005 not applied) everything stays single.
+    const batches = body.chunkId ? targets.map((chunk) => [chunk]) : batchTargets(targets, SHEET_SIZE);
+    const wantsSheets = batches.some((batch) => batch.length === SHEET_SIZE);
+    const sheetPrompts = wantsSheets ? await loadSheetPrompts({ needsLogo: Boolean(logo) && logoSendable(ctx) }) : null;
+    if (wantsSheets && !sheetPrompts) {
+      console.warn("generate-scene-images (lead): sheet prompts (migration 005) are missing, drawing one image per chapter.");
+    }
+    if (sheetPrompts) ctx.sheetOutfit = await loadSheetOutfit(fields.domainId);
+
     const claim = (chunkId: string) => claimChapter(supabase, id, provider, chunkId);
     const finish = (chunkId: string, patch: Record<string, unknown>) => finishChapter(supabase, id, chunkId, patch);
     const skipped: string[] = [];
-    const { results, remaining } = await runWithinBudget(
-      targets,
-      async (chunk): Promise<{ chunkId: string; status: ChapterImageStatus }> => {
-        if (!(await claim(chunk.id))) {
-          skipped.push(chunk.id);
-          return { chunkId: chunk.id, status: "pending" };
-        }
-        const index = project.chunks.findIndex((c) => c.id === chunk.id);
-        let brief: SceneBrief | undefined;
-        let prompt: string | undefined;
-        try {
-          // A chapter retried after a failure keeps its saved brief; an explicit regenerate asks the director again.
-          brief = body.chunkId ? undefined : briefs.get(chunk.id);
-          if (!brief) {
-            const previousScene = index > 0 ? (briefs.get(project.chunks[index - 1].id)?.scene ?? "") : "";
-            brief = await withTimeout(
-              directScene(textGenerate, buildDirectorPrompt(ctx, chunk, index, previousScene)),
-              DIRECTOR_TIMEOUT_MS,
-              "Scene director"
-            );
-            briefs.set(chunk.id, brief);
-          }
-          prompt = buildImagePrompt(ctx, brief, index);
-          const image = await withTimeout(
-            generator.generate({ prompt, referenceImages: references, aspect: "16:9" }),
-            IMAGE_TIMEOUT_MS,
-            "Image generation"
+    let sheets = 0;
+    let lowConfidenceSheets = 0;
+
+    /** One image for one chapter. `claimed`: the row is already pending (claimed by a batch that fell back). */
+    const runSingle = async (chunk: Chunk, claimed: boolean): Promise<{ chunkId: string; status: ChapterImageStatus }> => {
+      if (!claimed && !(await claim(chunk.id))) {
+        skipped.push(chunk.id);
+        return { chunkId: chunk.id, status: "pending" };
+      }
+      const index = chunks.findIndex((c) => c.id === chunk.id);
+      let brief: SceneBrief | undefined;
+      let prompt: string | undefined;
+      try {
+        // A chapter retried after a failure keeps its saved brief; an explicit regenerate asks the director again.
+        brief = body.chunkId ? undefined : briefs.get(chunk.id);
+        if (!brief) {
+          const previousScene = index > 0 ? (briefs.get(chunks[index - 1].id)?.scene ?? "") : "";
+          brief = await withTimeout(
+            directScene(textGenerate, buildDirectorPrompt(ctx, chunk, index, previousScene)),
+            DIRECTOR_TIMEOUT_MS,
+            "Scene director"
           );
-          const path = await uploadAndBackup(supabase, id, chunk.id, image);
-          await finish(chunk.id, {
-            status: "ready",
-            image_path: path,
-            prompt_used: encodeBrief(brief, prompt),
-            provider,
-            error: null,
-          });
-          startBackup(id, chunk.id, path, image.mimeType);
-          return { chunkId: chunk.id, status: "ready" };
-        } catch (error) {
-          console.error(`generate-scene-images (lead): chapter ${chunk.id} failed:`, error);
-          // The brief is kept (when there is one) so a retry does not change the story of the sequence.
-          await finish(chunk.id, {
-            status: "failed",
-            ...(brief && prompt ? { prompt_used: encodeBrief(brief, prompt) } : {}),
-            provider,
-            error: messageOf(error),
-          });
-          return { chunkId: chunk.id, status: "failed" };
+          briefs.set(chunk.id, brief);
         }
+        prompt = buildImagePrompt(ctx, brief, index);
+        const image = await withTimeout(
+          generator.generate({ prompt, referenceImages: references, aspect: "16:9" }),
+          IMAGE_TIMEOUT_MS,
+          "Image generation"
+        );
+        const path = await uploadAndBackup(supabase, id, chunk.id, image);
+        await finish(chunk.id, {
+          status: "ready",
+          image_path: path,
+          prompt_used: encodeBrief(brief, prompt),
+          provider,
+          error: null,
+        });
+        startBackup(id, chunk.id, path, image.mimeType);
+        return { chunkId: chunk.id, status: "ready" };
+      } catch (error) {
+        console.error(`generate-scene-images (lead): chapter ${chunk.id} failed:`, error);
+        // The brief is kept (when there is one) so a retry does not change the story of the sequence.
+        await finish(chunk.id, {
+          status: "failed",
+          ...(brief && prompt ? { prompt_used: encodeBrief(brief, prompt) } : {}),
+          provider,
+          error: messageOf(error),
+        });
+        return { chunkId: chunk.id, status: "failed" };
+      }
+    };
+
+    const { results: unitResults } = await runWithinBudget(
+      batches,
+      async (batch): Promise<{ chunkId: string; status: ChapterImageStatus }[]> => {
+        if (!sheetPrompts || batch.length !== SHEET_SIZE) {
+          const out = [];
+          for (const chunk of batch) out.push(await runSingle(chunk, false));
+          return out;
+        }
+        const outcome = await runSheetBatch({
+          ctx,
+          sheetPrompts,
+          chunks,
+          batch,
+          briefs,
+          textGenerate,
+          generator,
+          references,
+          provider,
+          claim,
+          finish,
+          upload: (chunkId, image) => uploadAndBackup(supabase, id, chunkId, image),
+          afterUpload: (chunkId, path, mimeType) => startBackup(id, chunkId, path, mimeType),
+          directorTimeoutMs: DIRECTOR_TIMEOUT_MS,
+          imageTimeoutMs: IMAGE_TIMEOUT_MS,
+        });
+        skipped.push(...outcome.skipped);
+        const out = [...outcome.results];
+        if (outcome.confidence) {
+          sheets++;
+          if (outcome.confidence === "low") lowConfidenceSheets++;
+        }
+        // Director failed or a chapter was claimed elsewhere: the chapters we hold are drawn one by one.
+        for (const chunk of outcome.fallback ?? []) out.push(await runSingle(chunk, true));
+        return out;
       },
       { budgetMs: BUDGET_MS }
     );
+    const results = unitResults.flat();
+    const remaining = batches.slice(unitResults.length).reduce((sum, batch) => sum + batch.length, 0);
 
     const reported = results.filter((result) => !skipped.includes(result.chunkId));
     await logActivity(user, id, body.chunkId ? "image.regenerated" : "images.generated", {
       chunkId: body.chunkId,
       mode: "lead",
+      sheets,
+      lowConfidenceSheets,
       requested: targets.length,
       ready: reported.filter((r) => r.status === "ready").length,
       failed: reported.filter((r) => r.status === "failed").length,
@@ -280,14 +340,25 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
     if (!existing) return errorJson("Project not found.", "not_found", 404);
     const project = rowToProject(existing as unknown as ProjectRow);
 
-    if (body.chunkId && !project.chunks.some((chunk) => chunk.id === body.chunkId)) {
+    // Showcase uses the fixed lead character; every other template keeps the domain-avatar flow.
+    const leadMode = body.mode ? body.mode === "lead" : project.selectedTemplateId === "showcase";
+
+    // A case study is shown section by section, so lead scenes are drawn per section under the
+    // same ids the page uses (`case-study-<key>`), not per project chunk.
+    const caseStudyScenes = leadMode && project.documentType === "case-study";
+    if (caseStudyScenes && !project.caseStudyBinding?.slots) {
+      return errorJson("Generate the case study layout first: scene images are drawn per section.", "no_layout", 400);
+    }
+    const sceneChunks = caseStudyScenes
+      ? caseStudySectionsAsChunks(flattenCaseStudySections(project.caseStudyBinding?.slots ?? null), undefined)
+      : project.chunks;
+
+    if (body.chunkId && !sceneChunks.some((chunk) => chunk.id === body.chunkId)) {
       return errorJson("That chapter does not exist.", "unknown_chunk", 400);
     }
 
-    // Showcase uses the fixed lead character; every other template keeps the domain-avatar flow.
-    const leadMode = body.mode ? body.mode === "lead" : project.selectedTemplateId === "showcase";
     if (leadMode) {
-      return await generateLeadScenes({ request, user, project, body });
+      return await generateLeadScenes({ request, user, project, chunks: sceneChunks, body });
     }
 
     // Which domain avatar was chosen: the 'domain:<id>' entry in selectedAvatarIds, else projects.domain_avatar_id.

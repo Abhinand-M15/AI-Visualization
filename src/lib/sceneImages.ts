@@ -6,9 +6,11 @@
  * column yields "none" (empty rows / no fields), never an exception.
  */
 import { getSupabase } from "@/lib/db";
+import { cloudflareConfigured } from "@/lib/imageGen/cloudflare";
 import { logoUrl, SCENE_IMAGES_BUCKET, sceneImageUrl } from "@/lib/storageUrls";
 import type { AppUser } from "@/lib/auth/session";
-import type { Chunk } from "@/lib/types";
+import type { Chunk, SectionImage } from "@/lib/types";
+import { sectionKeyFromChunkId } from "@/lib/caseStudySections";
 
 export type ChapterImageStatus = "pending" | "ready" | "failed";
 
@@ -110,6 +112,18 @@ export function applyChapterImages(chunks: Chunk[], rows: ChapterImageRow[]): Ch
   });
 }
 
+/** Case-study scene images by section key, from rows stored as `case-study-<key>`. undefined when there are none. */
+export function buildSectionImages(rows: ChapterImageRow[]): Record<string, SectionImage> | undefined {
+  const out: Record<string, SectionImage> = {};
+  for (const row of rows) {
+    const key = sectionKeyFromChunkId(row.chunk_id);
+    if (!key) continue;
+    const url = row.status === "ready" ? chapterImageUrl(row) : undefined;
+    out[key] = { ...(url ? { imageUrl: url } : {}), imageStatus: row.status };
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
 export interface ProjectDomainFields {
   domainId?: string;
   domainAvatarId?: string;
@@ -147,6 +161,7 @@ export function logoUrlFor(path: string | undefined): string | undefined {
 
 /** Image provider recorded for the user (profiles.image_provider); "gemini" when auth is off or unreadable. */
 export async function imageProviderLabel(user: AppUser | null): Promise<string> {
+  if (cloudflareConfigured()) return "cloudflare";
   if (!user) return "gemini";
   try {
     const { data } = await getSupabase().from("profiles").select("image_provider").eq("id", user.id).maybeSingle();

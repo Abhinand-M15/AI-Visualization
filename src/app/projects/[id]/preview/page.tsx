@@ -8,7 +8,7 @@ import { TEMPLATE_COMPONENTS } from "@/components/templates";
 import CaseStudyTemplate from "@/components/templates/CaseStudyTemplate";
 import { TEMPLATE_UNAVAILABLE_MESSAGE } from "@/lib/templates";
 import { useAvailableTemplates } from "@/lib/useAvailableTemplates";
-import { caseStudySectionsAsChunks, flattenCaseStudySections } from "@/lib/caseStudySections";
+import { applySectionImages, caseStudySectionsAsChunks, flattenCaseStudySections } from "@/lib/caseStudySections";
 import { resolvePreviewAvatars } from "./actions";
 
 export default function PreviewPage({ params }: { params: Promise<{ id: string }> }) {
@@ -99,7 +99,13 @@ export default function PreviewPage({ params }: { params: Promise<{ id: string }
         {backLink}
         <ChunkTemplate
           title={project.title}
-          chunks={caseStudySectionsAsChunks(caseStudySections, project.caseStudyBinding?.sectionAudio)}
+          chunks={applySectionImages(
+            caseStudySectionsAsChunks(caseStudySections, project.caseStudyBinding?.sectionAudio),
+            project.sectionImages
+          ).map((chunk) =>
+            // Only ready images count; anything else shows the avatar as before.
+            chunk.imageUrl && chunk.imageStatus !== "ready" ? { ...chunk, imageUrl: undefined } : chunk
+          )}
           avatars={avatars}
           logoUrl={logoUrl}
         />

@@ -12,11 +12,12 @@ import {
   type ProjectRow,
 } from "@/lib/projects";
 import { contentFingerprint } from "@/lib/contentVersion";
-import type { Chunk, PublicationRecord } from "@/lib/types";
+import type { Chunk, Project, PublicationRecord } from "@/lib/types";
 import { AVATARS, avatarVideoFallbackUrl, type Avatar } from "@/lib/avatars";
 import { resolveAvatars } from "@/lib/domainAvatars";
 import { logoUrl as companyLogoUrl, sceneImageUrl } from "@/lib/storageUrls";
 import { VOYAGE_ASSET_ROOT, voyageAssetPaths, type VoyageMood } from "@/lib/voyage";
+import { caseStudySectionsAsChunks, flattenCaseStudySections, sectionKeyFromChunkId } from "@/lib/caseStudySections";
 import { showcaseAssetPaths } from "@/lib/showcase";
 import { LUNAR_MOON_TEXTURE_PUBLIC_PATH, renderStaticSite } from "@/lib/publish/staticSite";
 import { TEMPLATE_UNAVAILABLE_MESSAGE, isTemplateAvailable } from "@/lib/templates";
@@ -310,6 +311,18 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
     // so the published site is self-contained (Showcase too: tiles, chapter pages and header use them). A failed download never fails the publish.
     const storageFiles: DeployFile[] = [];
     const selectedAvatars = await bundleDomainAvatars(resolvedAvatarList, storageFiles);
+    // Case studies on Showcase show their sections as chapters, so the scene images are bundled per
+    // section (ids `case-study-<key>`) and handed to the renderer as sectionImages. Other case studies have none.
+    const showcaseCaseStudy = isCaseStudy && project.selectedTemplateId === "showcase";
+    let sectionImages: Project["sectionImages"];
+    if (showcaseCaseStudy) {
+      const sectionChunks = caseStudySectionsAsChunks(flattenCaseStudySections(project.caseStudyBinding?.slots ?? null), undefined);
+      const bundledSections = await bundleSceneImages(supabase, id, sectionChunks, storageFiles);
+      for (const chunk of bundledSections) {
+        const key = sectionKeyFromChunkId(chunk.id);
+        if (key && chunk.imageUrl) (sectionImages ??= {})[key] = { imageUrl: chunk.imageUrl, imageStatus: "ready" };
+      }
+    }
     const bundledChunks = isCaseStudy ? project.chunks : await bundleSceneImages(supabase, id, project.chunks, storageFiles);
     const rowLogoPath = (existing as unknown as ProjectRow).logo_path;
     const bundledLogo = rowLogoPath ? await bundleLogo(rowLogoPath, storageFiles) : undefined;
@@ -358,7 +371,7 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
       })
     );
 
-    const siteProject = { ...project, chunks: bundledChunks, logoUrl: bundledLogo };
+    const siteProject = { ...project, chunks: bundledChunks, logoUrl: bundledLogo, ...(sectionImages ? { sectionImages } : {}) };
     const html = renderStaticSite(siteProject, selectedAvatars, supabaseUrl, { voyage: { customMusic: voyageMusic } });
     const files: DeployFile[] = [
       { file: "index.html", data: Buffer.from(html, "utf-8").toString("base64"), encoding: "base64" },

@@ -1,6 +1,6 @@
 import type { Chunk, Project } from "@/lib/types";
 import { avatarVideoFallbackUrl, getAvatarImage, type Avatar } from "@/lib/avatars";
-import { caseStudySectionsAsChunks, flattenCaseStudySections, type CaseStudySection } from "@/lib/caseStudySections";
+import { applySectionImages, caseStudySectionsAsChunks, flattenCaseStudySections, type CaseStudySection } from "@/lib/caseStudySections";
 import { lunarHeroDescription, lunarHeroTitleParts, lunarHeroTitleSize } from "@/lib/lunarHero";
 import {
   NARRATION_DOCK_CSS,
@@ -1923,7 +1923,11 @@ function renderStaticSiteBody(
     // Showcase too.
     if (project.selectedTemplateId === "showcase" && isTemplateAvailable("showcase")) {
       const sections = flattenCaseStudySections(project.caseStudyBinding.slots);
-      const chunks = caseStudySectionsAsChunks(sections, project.caseStudyBinding.sectionAudio);
+      // Scene images per section (the publish route has bundled them into project.sectionImages).
+      const chunks = applySectionImages(
+        caseStudySectionsAsChunks(sections, project.caseStudyBinding.sectionAudio),
+        project.sectionImages
+      ).map((chunk) => (chunk.imageUrl && chunk.imageStatus !== "ready" ? { ...chunk, imageUrl: undefined } : chunk));
       return renderShowcase({ ...project, chunks }, avatars, supabaseUrl);
     }
     return renderCaseStudy(project, avatars, supabaseUrl);

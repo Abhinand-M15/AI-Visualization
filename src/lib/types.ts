@@ -141,6 +141,12 @@ export interface PublicationRecord {
   inferred?: boolean;
 }
 
+/** Scene image of one bound case-study section (see sectionImages on Project). */
+export interface SectionImage {
+  imageUrl?: string;
+  imageStatus: "pending" | "ready" | "failed";
+}
+
 export interface Project {
   id: string;
   title: string;
@@ -157,6 +163,11 @@ export interface Project {
   caseStudyBinding?: CaseStudyBinding | null;
   /** Fingerprint of what was last published; compare with contentFingerprint(project). */
   publication?: PublicationRecord;
+  /**
+   * Case studies only (GET /api/projects/[id]): scene image per section, keyed by
+   * CaseStudySection.key (chapter_images.chunk_id is `case-study-<key>`). Absent when none exist.
+   */
+  sectionImages?: Record<string, SectionImage>;
   /** Chosen industry domain (domains.id). Unset when the domains migration isn't applied. */
   domainId?: string;
   /** Chosen domain avatar (domain_avatars.id); selectedAvatarIds carries it as `domain:<id>`. */

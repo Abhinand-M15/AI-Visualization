@@ -1,4 +1,4 @@
-import type { Chunk, EmotionKey } from "@/lib/types";
+import type { Chunk, EmotionKey, SectionImage } from "@/lib/types";
 
 /**
  * A single narratable moment in the published case-study experience —
@@ -80,13 +80,39 @@ export function caseStudySectionsAsChunks(
   sectionAudio: Record<string, string> | undefined
 ): Chunk[] {
   return sections.map((section, index) => ({
-    id: `case-study-${section.key}`,
+    id: `${CASE_STUDY_CHUNK_PREFIX}${section.key}`,
     order: index + 1,
     title: section.title,
     narrativeText: section.body,
     emotion: section.emotion,
     ...(sectionAudio?.[section.key] ? { audioUrl: sectionAudio[section.key] } : {}),
   }));
+}
+
+/** Chunk id (and chapter_images.chunk_id) of a section. */
+export const CASE_STUDY_CHUNK_PREFIX = "case-study-";
+
+/** Section key from a `case-study-<key>` chunk id; null for any other id. */
+export function sectionKeyFromChunkId(chunkId: string): string | null {
+  return chunkId.startsWith(CASE_STUDY_CHUNK_PREFIX) && chunkId.length > CASE_STUDY_CHUNK_PREFIX.length
+    ? chunkId.slice(CASE_STUDY_CHUNK_PREFIX.length)
+    : null;
+}
+
+/**
+ * Adds the per-section scene images to section chunks (ids `case-study-<key>`). Only 'ready'
+ * images with a URL set imageUrl; the status is kept for every section that has a row.
+ * Chunks without an entry are returned untouched.
+ */
+export function applySectionImages(chunks: Chunk[], sectionImages: Record<string, SectionImage> | undefined): Chunk[] {
+  if (!sectionImages) return chunks;
+  return chunks.map((chunk) => {
+    const key = sectionKeyFromChunkId(chunk.id);
+    const entry = key ? sectionImages[key] : undefined;
+    if (!entry) return chunk;
+    const usable = entry.imageStatus === "ready" && entry.imageUrl;
+    return { ...chunk, ...(usable ? { imageUrl: entry.imageUrl } : {}), imageStatus: entry.imageStatus };
+  });
 }
 
 export function flattenCaseStudySections(slots: Record<string, unknown> | null): CaseStudySection[] {

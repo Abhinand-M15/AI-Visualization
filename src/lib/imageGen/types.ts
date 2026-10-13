@@ -4,6 +4,7 @@
  */
 import type { AppUser } from "@/lib/auth/session";
 import { MissingApiKeyError, getImageProviderFor, getUserKey } from "@/lib/userKeys";
+import { cloudflareConfigured, createCloudflareImageGenerator } from "./cloudflare";
 import { createGeminiImageGenerator } from "./gemini";
 import { createOpenAIImageGenerator } from "./openai";
 
@@ -19,7 +20,14 @@ export interface ImageGenerator {
      * takes precedence over referenceImage; order is kept.
      */
     referenceImages?: { mimeType: string; data: Buffer }[];
-    aspect?: "16:9" | "1:1" | "3:4";
+    /**
+     * "sheet" is a contact sheet: ONE image holding a 2x2 grid of four 16:9 panels, cropped
+     * into four pictures afterwards (src/lib/sheetCrop.ts). Providers map it to their widest
+     * landscape size; `size` (when the provider honours it) overrides that.
+     */
+    aspect?: "16:9" | "1:1" | "3:4" | "sheet";
+    /** Explicit output size in pixels. Only Cloudflare uses it (clamped to 256-1920, multiples of 16); others pick the nearest of their own sizes. */
+    size?: { width: number; height: number };
   }): Promise<{ mimeType: string; data: Buffer }>;
 }
 
@@ -30,6 +38,11 @@ export interface ImageGenerator {
  * code 'missing_api_key') when the needed key is missing.
  */
 export async function getImageGeneratorFor(user: AppUser | null): Promise<ImageGenerator> {
+  // Free option first: when Cloudflare Workers AI credentials are set on the server, every
+  // user generates through it (no personal image key needed, nothing paid).
+  if (cloudflareConfigured()) {
+    return createCloudflareImageGenerator(process.env.CLOUDFLARE_ACCOUNT_ID!.trim(), process.env.CLOUDFLARE_API_TOKEN!.trim());
+  }
   if (!user) {
     const envKey = process.env.GEMINI_API_KEY?.trim();
     if (!envKey) throw new MissingApiKeyError("GEMINI_API_KEY is not set on the server, so images cannot be generated.");

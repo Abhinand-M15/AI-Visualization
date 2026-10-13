@@ -19,7 +19,7 @@ import { mergeChunks } from "@/lib/chunkMerge";
 import { requireUser, unauthorizedResponse } from "@/lib/auth/session";
 import { logActivity } from "@/lib/activity";
 import { pathBelongsTo } from "@/app/api/logos/server";
-import { applyChapterImages, loadChapterImageRows, loadProjectDomainFields, logoUrlFor } from "@/lib/sceneImages";
+import { applyChapterImages, buildSectionImages, loadChapterImageRows, loadProjectDomainFields, logoUrlFor } from "@/lib/sceneImages";
 
 const AUDIO_BUCKET = "chunk-audio";
 const VIDEO_BUCKET = "chunk-video";
@@ -44,6 +44,8 @@ export async function GET(_request: Request, context: { params: Promise<{ id: st
     // not migrated, so a project without any of it is returned exactly as before.
     const [fields, imageRows] = await Promise.all([loadProjectDomainFields(id), loadChapterImageRows(id)]);
     const logoUrl = logoUrlFor(fields.logoPath);
+    // Case studies are shown section by section: their scene images are keyed by section.
+    const sectionImages = project.documentType === "case-study" ? buildSectionImages(imageRows) : undefined;
     return NextResponse.json({
       project: {
         ...project,
@@ -51,6 +53,7 @@ export async function GET(_request: Request, context: { params: Promise<{ id: st
         ...(fields.domainId ? { domainId: fields.domainId } : {}),
         ...(fields.domainAvatarId ? { domainAvatarId: fields.domainAvatarId } : {}),
         ...(logoUrl ? { logoUrl } : {}),
+        ...(sectionImages ? { sectionImages } : {}),
       },
     });
   } catch (error) {

@@ -8,8 +8,10 @@ import { ImageGenerationError, collectReferences, errorDetail, fetchWithRetry } 
 
 type GenerateOpts = Parameters<ImageGenerator["generate"]>[0];
 
-/** Gemini supports all three of our aspects natively. */
+/** Gemini supports all of our aspects natively (the sheet maps to 16:9). */
 export function geminiAspect(aspect: GenerateOpts["aspect"]): "16:9" | "1:1" | "3:4" {
+  // The sheet is four 16:9 panels, so its widest native shape is 16:9.
+  if (aspect === "sheet") return "16:9";
   return aspect === "16:9" || aspect === "3:4" ? aspect : "1:1";
 }
 

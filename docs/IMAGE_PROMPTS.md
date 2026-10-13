@@ -98,3 +98,54 @@ Run these once images generate. For each case, generate a full story (at least 5
 | 6 | Banking and Finance (or any of retail, logistics, real estate, education) | Yes | Outfit matches the table above; logo on the lapel pin, lanyard card or portfolio; consistent colour grade and style across chapters; frames are 16:9 with no text or watermark. |
 
 For every case also confirm: aspect ratio 16:9 on all frames; no text, captions or speech bubbles; the lead is the main subject with his face visible; the first frame reads as an opening and the last as a positive close; chapters do not repeat the same shot.
+
+## 7. Contact-sheet generation (four chapters per image)
+
+Image generation runs on Cloudflare Workers AI's free plan (FLUX.2 klein 4B, 10,000 Neurons per day shared). To stay inside that allowance and to keep the scenes in one consistent style, lead mode draws **four scenes in ONE image** (a 2x2 sheet of four equal 16:9 panels) and the server **crops it into four chapter images**. Created by `db/migrations/005_lead_sheet_prompts.sql`. Without that migration the app silently keeps drawing one image per chapter (section 2).
+
+### 7.1 The flow
+
+1. The route picks the targets as before (`chunkId`, `onlyMissing`, `retryFailed`, or all), in display order, and groups them in batches of 4.
+2. A full batch of 4 is one **sheet**: the four rows are claimed (`pending`, so the panel shows all four as generating); then ONE director call returns four scenes; then ONE image call draws the sheet; then `src/lib/sheetCrop.ts` cuts it into four 960x540 JPEGs; each is uploaded and saved on its own chapter row.
+3. A leftover batch of 1-3 targets and every explicit single "Regenerate" (`chunkId`) use the single-image path of section 2 (nothing is wasted on empty panels).
+4. Resumability, the 235 s budget, the fresh-pending skip, backups and the activity log work per batch. Each panel's scene brief is saved in `chapter_images.prompt_used` (the same JSON as before, plus `"sheet":true`), so a later single regenerate or retry reuses the neighbours' briefs. If all four briefs of a batch are already saved (a retry), the director is skipped.
+5. Failures: a failed sheet marks all four rows `failed` with the error text (briefs kept) so "Retry failed" redoes them; a crop or upload failure of one panel fails only that row; if the director fails twice (or a chapter is held by another run) the batch falls back to the single-image path for its chapters.
+
+### 7.2 Prompt keys and placeholders
+
+| Key | Used by | Placeholders |
+|---|---|---|
+| `lead_sheet_rules` | inserted into `lead_sheet_image` | none (compact identity and style block, about 480 characters) |
+| `lead_sheet_image` | image model, one call per sheet | `{{sheet_rules}}` (body of `lead_sheet_rules`), `{{domain_name}}`, `{{outfit_description}}` (the short `domains.outfit_sheet`), `{{logo_instruction}}` (filled `lead_sheet_logo`, empty without a logo), `{{panel_1}}` ... `{{panel_4}}` (the four scenes) |
+| `lead_sheet_logo` | builds `{{logo_instruction}}` | `{{logo_placement}}` (`domains.logo_placement`) |
+| `lead_sheet_director` | text model, one call per sheet | `{{story_title}}`, `{{domain_name}}`, `{{outfit_description}}`, `{{previous_scene}}` (last saved brief before the batch, empty at the start), `{{chapter_total}}`, and for k = 1..4 `{{chapter_k_index}}`, `{{chapter_k_title}}`, `{{chapter_k_text}}` |
+
+The director returns `{"scenes":[{"scene":"...","emotion":"..."} x4]}` in chapter order. Parsing tolerates code fences, prose around the JSON and a bare array; a wrong count or empty scene triggers one retry, then the single-image fallback. The existing keys (`lead_character_rules`, `scene_director`, `lead_scene_image`, `lead_logo_instruction`) stay in use for the single-image path.
+
+### 7.3 The length budget (important)
+
+FLUX.2 klein's text encoder reads only about 500 tokens, roughly 1,800 to 2,000 characters; later text may be ignored. So the FILLED sheet prompt must stay under about **1,900 characters** (`SHEET_PROMPT_MAX_CHARS` in `src/lib/leadCharacter.ts`). Typical split: layout about 300, rules about 480, outfit about 175, logo line about 120 plus the placement, four panels about 150 each (a manufacturing story with a logo fills about 1,870). Order matters because early text is weighted most: layout first, then identity, then outfit and logo, then panels.
+
+The code guards the length: if the filled prompt exceeds the limit it shortens the four panel scenes (longest first, never below about 60 characters) and logs `generate-scene-images (sheet): prompt was N characters ...`. It never touches the layout, rules or outfit. If it warns "still N characters after trimming the panels", shorten `lead_sheet_rules`, `lead_sheet_image` or `domains.outfit_sheet`. Domains without `outfit_sheet` fall back to the first clause group (before the first ";", at most about 220 characters) of `outfit_description`. The director is asked for scenes of at most 25 words so trimming is rare; check the server log for the warning after tuning any of these texts.
+
+### 7.4 Cropping (`src/lib/sheetCrop.ts`)
+
+The sheet is requested at 1920x1072 on Cloudflare (four 960x536 panels; the API range is 256-1920 per side, multiples of 16). Gemini maps the sheet to 16:9 and OpenAI to 1536x1024; the crop does not depend on the exact size. Detection looks at the middle 20% of the sheet: the whitest column and the whitest row (mean of the per-pixel minimum of R, G and B) are the gutters, expanded while the line stays near-white (a band wider than 8% of the side is rejected as a white wall). Each of the four panels is trimmed by a small inset, centre-cropped to exactly 16:9, resized to 960x540 and saved as JPEG quality 86. When no clear gutter is found on an axis, exact halves with a 1.5% inset are used on that axis and the log says `confidence low`. A low-confidence sheet is still saved; check it by eye.
+
+### 7.5 Tuning
+
+Same procedure as section 3 (Table Editor, edit `body`, bump `version`, test). Re-running migration 005 resets the four sheet prompts and all `outfit_sheet` values. Change one thing at a time and generate one sheet (four chapters) to judge it. Keep every placeholder exactly as written. Outfit and logo wording for sheets: edit `domains.outfit_sheet` (about 150 characters, items only) and `logo_placement`.
+
+### 7.6 Sheet failure modes and fixes
+
+| Problem | Likely cause | Fix |
+|---|---|---|
+| Panels bleed into each other (one scene crosses a gutter, or a panel contains two shots) | Layout instruction too weak or too late in the prompt; scenes that describe wide panoramas | Keep the layout paragraph first and unchanged; make "separated by straight solid pure-white gutters" stronger; ask the director for compact single-moment scenes. Regenerate the batch (Retry failed), or one chapter (single-image path). |
+| Gutter not white (grey, tinted, thin or missing) | Model ignored the colour instruction | The crop tolerates grey and noisy gutters down to about 205 of 255. Otherwise it logs `confidence low` and cuts exact halves, which can include a gutter strip: regenerate. Add emphasis on "#FFFFFF" in the layout paragraph. |
+| Character drifts between sheets (or between panels) | Reference image weight; rules pushed past the length limit; close-ups | Check the prompt length warning first. Keep the identity facts first in `lead_sheet_rules`. Regenerate the one bad chapter with the single-image path (fresh `lead_scene_image` prompt). |
+| Wrong number of panels (three, five, a collage) | Model ignores counts when the text is long | Shorten the rest of the prompt (the layout must stay in the first 300 characters); retry. The crop always returns four crops, so look at the result. |
+| Prompt truncated by the encoder (panels 3 and 4 ignored or generic) | Filled prompt over about 1,900 characters | Check the log for the length warning; shorten `lead_sheet_rules`, `outfit_sheet`, `logo_placement`, or ask the director for shorter scenes (change "25 words"). |
+| Director returns the wrong number of scenes or text around the JSON | Model drift | Handled by one retry, then fallback to single images for that batch; if frequent, strengthen the OUTPUT section of `lead_sheet_director`. |
+| Logo missing or wrong on a sheet | Four scenes share one logo line; small logo; hat out of frame | Keep `lead_sheet_logo` short and `logo_placement` to one surface. Regenerate single chapters when the logo matters. |
+| Free daily allowance used up on all four rows | The daily Neuron budget is spent | Wait for 00:00 UTC, then "Retry failed" (saved briefs are reused, no new director call). |
+| Rows stay "Generating..." after a crash | A run died mid-batch | Rows older than 6 minutes count as stale and are picked up by the next run. |

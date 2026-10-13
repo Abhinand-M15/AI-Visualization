@@ -12,6 +12,7 @@ type GenerateOpts = Parameters<ImageGenerator["generate"]>[0];
 export function openaiSize(aspect: GenerateOpts["aspect"]): string {
   switch (aspect) {
     case "16:9":
+    case "sheet": // nearest wide size; the crop is detection-based and re-fits each panel to 16:9
       return "1536x1024";
     case "3:4":
       return "1024x1536";
