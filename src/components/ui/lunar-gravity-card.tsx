@@ -355,6 +355,93 @@ const AsteroidBelt = ({ ringState, massiveAsteroidsRef }: { ringState: 'hidden' 
   );
 };
 
+// Same constants as the published page (staticSite.ts MOON_SETTLE_*): once the
+// moon has left its card it eases down and grows a little as it settles.
+const MOON_SETTLE_Y = -0.6;
+const MOON_SETTLE_SCALE = 1.15;
+const CARD_RADIUS = 40;
+
+// Drives the whole card-to-background hand-off from the render loop (mirrors
+// the published page's layout()+tick()). Scroll events only wake the loop; the
+// progress chases its scroll target every frame (exponential smoothing), so
+// bursts of wheel events cannot make it step. The layer is a full-window fixed
+// canvas whose size never changes: the visible window is a clip-path and the
+// camera view offset, so no layout or canvas resize happens while it moves.
+const HandoffRig = ({
+  groupRef, slotRef, cardRef, layerRef, onRing, onIdle,
+}: {
+  groupRef: React.RefObject<THREE.Group | null>;
+  slotRef: React.RefObject<HTMLDivElement | null>;
+  cardRef: React.RefObject<HTMLDivElement | null>;
+  layerRef: React.RefObject<HTMLDivElement | null>;
+  onRing: () => void;
+  onIdle: () => void;
+}) => {
+  const easedRef = useRef(0);
+  const initRef = useRef(false);
+  const settledKeyRef = useRef("");
+  const lastClipRef = useRef("");
+  useFrame(({ camera }, rawDelta) => {
+    const dt = Math.min(0.05, Math.max(0, rawDelta));
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
+    const target = Math.min(1, Math.max(0, window.scrollY / (vh * 0.85)));
+    if (!initRef.current) { easedRef.current = target; initRef.current = true; }
+    easedRef.current += (target - easedRef.current) * (1 - Math.pow(0.001, dt));
+    if (Math.abs(target - easedRef.current) < 0.0005) easedRef.current = target;
+    const p = easedRef.current;
+    const e = p * p * (3 - 2 * p);
+
+    const g = groupRef.current;
+    if (g) {
+      g.position.y = MOON_SETTLE_Y * e;
+      g.scale.setScalar(1 + (MOON_SETTLE_SCALE - 1) * e);
+    }
+    if (e > 0.02) onRing();
+    if (target === 0 && e === 0) onIdle();
+
+    const slot = slotRef.current;
+    const card = cardRef.current;
+    const layer = layerRef.current;
+    if (!slot || !card || !layer) return;
+    // Fully handed over: the frame is the whole window, skip layout reads
+    // until the window size changes.
+    if (e >= 1) {
+      const key = `${vw}x${vh}`;
+      if (key === settledKeyRef.current) return;
+      settledKeyRef.current = key;
+    } else {
+      settledKeyRef.current = "";
+    }
+    const r = slot.getBoundingClientRect();
+    const c = card.getBoundingClientRect();
+    const x = r.left * (1 - e);
+    const y = r.top * (1 - e);
+    const w = r.width + (vw - r.width) * e;
+    const h = r.height + (vh - r.height) * e;
+    if (w < 1 || h < 1) return;
+    const cam = camera as THREE.PerspectiveCamera;
+    cam.aspect = w / h;
+    cam.setViewOffset(w, h, -x, -y, vw, vh);
+    cam.updateProjectionMatrix();
+    let clip = "none";
+    if (e < 1) {
+      const rad = CARD_RADIUS * (1 - e);
+      const near = (a: number, b: number) => Math.abs(a - b) < 2;
+      const tl = near(r.left, c.left) && near(r.top, c.top) ? rad : 0;
+      const tr = near(r.right, c.right) && near(r.top, c.top) ? rad : 0;
+      const br = near(r.right, c.right) && near(r.bottom, c.bottom) ? rad : 0;
+      const bl = near(r.left, c.left) && near(r.bottom, c.bottom) ? rad : 0;
+      clip = `inset(${y}px ${vw - x - w}px ${vh - y - h}px ${x}px round ${tl}px ${tr}px ${br}px ${bl}px)`;
+    }
+    if (clip !== lastClipRef.current) {
+      layer.style.clipPath = clip;
+      lastClipRef.current = clip;
+    }
+  });
+  return null;
+};
+
 export interface LunarGravityCardProps {
   className?: string;
   title?: React.ReactNode;
@@ -394,6 +481,25 @@ export default function LunarGravityCard({
       document.removeEventListener("visibilitychange", onVisibility);
     };
   }, []);
+  // Scroll-driven hand-off from card to page background (same maths as the
+  // published page's layout()): at scrollY 0 the canvas wrapper sits in the
+  // card's scene slot; over the first ~85% of a viewport of scrolling it eases
+  // out to a fixed full-window layer behind the page, and stays there.
+  const slotRef = useRef<HTMLDivElement>(null);
+  const bgRef = useRef<HTMLDivElement>(null);
+  const groupRef = useRef<THREE.Group>(null);
+  // inBackground keeps the render loop running while scrolled or still easing
+  // back; scroll events only flip it (React bails out when unchanged), and the
+  // rig clears it once the eased progress is back at rest at the top.
+  const [inBackground, setInBackground] = useState(false);
+  useEffect(() => {
+    const onScroll = () => setInBackground(window.scrollY > 0);
+    onScroll();
+    window.addEventListener("scroll", onScroll, { passive: true });
+    return () => window.removeEventListener("scroll", onScroll);
+  }, []);
+  const onRing = React.useCallback(() => setRingState((s) => (s === "hidden" ? "animating" : s)), []);
+  const onIdle = React.useCallback(() => setInBackground(false), []);
   // A little lower on small screens, where the GPU is weakest.
   const dpr: [number, number] = typeof window !== "undefined" && window.innerWidth < 768 ? [1, 1.5] : [1, 2];
 
@@ -411,16 +517,17 @@ export default function LunarGravityCard({
         </p>
       </div>
      
-      <div className="relative md:absolute md:right-0 md:top-0 w-full h-[450px] md:h-full md:w-[65%] pointer-events-auto z-0 flex items-center justify-center">
-        <div className="absolute inset-0 w-full h-full">
-          <Canvas shadows camera={{ position: [0, 4, 10], fov: 45 }} dpr={dpr} frameloop={onScreen && tabVisible ? "always" : "never"}>
+      <div ref={slotRef} className="relative md:absolute md:right-0 md:top-0 w-full h-[450px] md:h-full md:w-[65%] pointer-events-auto z-0 flex items-center justify-center">
+        <div ref={bgRef} className="fixed inset-0 z-[1] w-screen h-screen" style={{ clipPath: "inset(100%)" }}>
+          <Canvas shadows camera={{ position: [0, 4, 10], fov: 45 }} dpr={dpr} frameloop={(onScreen || inBackground) && tabVisible ? "always" : "never"}>
             <ambientLight intensity={0.02} />
             <directionalLight position={[8, 5, 5]} intensity={1.5} color="#ffffff" castShadow shadow-mapSize={[1024, 1024]} />
             <directionalLight position={[-5, -3, -5]} intensity={0.15} color="#4a90e2" />
 
             <OrbitControls enableZoom={false} enablePan={false} autoRotate={false} />
 
-            <group rotation={[Math.PI / 8, 0, 0]}>
+            <HandoffRig groupRef={groupRef} slotRef={slotRef} cardRef={wrapRef} layerRef={bgRef} onRing={onRing} onIdle={onIdle} />
+            <group ref={groupRef} rotation={[Math.PI / 8, 0, 0]}>
               <Suspense fallback={null}>
                 <RealisticMoon onClick={() => { if(ringState === 'hidden') setRingState('animating') }} />
                 <ParticleRing ringState={ringState} massiveAsteroidsRef={massiveAsteroidsRef} />

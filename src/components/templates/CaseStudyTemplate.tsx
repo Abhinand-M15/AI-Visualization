@@ -265,7 +265,7 @@ export default function CaseStudyTemplate({
         return (
           <section
             key={section.key}
-            className={`case-study-section relative border-t px-6 py-16 md:px-12 md:py-24 ${border}`}
+            className={`case-study-section relative ${theme === "lunar" ? "z-[2] " : ""}border-t px-6 py-16 md:px-12 md:py-24 ${border}`}
           >
             <ChapterLayout
               theme={CASE_STUDY_CHAPTER_THEMES[theme]}

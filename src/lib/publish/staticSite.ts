@@ -924,9 +924,17 @@ const LUNAR_INIT_JS = `
   var backgroundProgress = 0;
   function near(a, b) { return Math.abs(a - b) < 2; }
   var settledKey = '';
-  function layout() {
+  // Eased scroll progress: scroll events arrive in bursts (wheel notches), so the
+  // raw position steps. The progress chases its target every frame instead
+  // (exponential smoothing) and every visual is driven from this eased value.
+  var easedP = 0, easedInit = false;
+  function layout(dt) {
     var vw = window.innerWidth, vh = window.innerHeight;
-    var p = Math.min(1, Math.max(0, window.scrollY / (vh * 0.85)));
+    var target = Math.min(1, Math.max(0, window.scrollY / (vh * 0.85)));
+    if (!easedInit) { easedP = target; easedInit = true; }
+    easedP += (target - easedP) * (1 - Math.pow(0.001, dt));
+    if (Math.abs(target - easedP) < 0.0005) easedP = target;
+    var p = easedP;
     var e = p * p * (3 - 2 * p);
     backgroundProgress = e;
     // Once the hand-off is complete the frame is the whole window and no longer
@@ -1245,6 +1253,7 @@ const LUNAR_INIT_JS = `
   }
 
   var SPEED = 0.6;
+  var MOON_SETTLE_Y = -0.6, MOON_SETTLE_SCALE = 1.15;
   var moonScrollTarget = 0, moonScrollTurn = 0, smoothedScrollVelocity = 0;
   var scratchMatrix = new THREE.Matrix4();
   var scratchVector = new THREE.Vector3();
@@ -1258,7 +1267,13 @@ const LUNAR_INIT_JS = `
     var delta = Math.min(0.05, Math.max(0, now - last));
     last = now;
 
-    layout();
+    layout(delta);
+    // The moon settles into the background: as the hand-off from card to page
+    // completes it eases down and grows a little, so it sits behind the
+    // speaking avatar rather than at the card's framing. Same constants and
+    // same progress value as the React preview (lunar-gravity-card.tsx).
+    group.position.y = MOON_SETTLE_Y * backgroundProgress;
+    group.scale.setScalar(1 + (MOON_SETTLE_SCALE - 1) * backgroundProgress);
     processPointerMove();
     // Once the moon leaves the card to become the page background, its ring
     // and asteroid belt form on their own (clicking the moon in the hero

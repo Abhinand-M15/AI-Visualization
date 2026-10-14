@@ -146,7 +146,7 @@ export default function LunarTemplate({ title, chunks, avatars, logoUrl }: Templ
         return (
           <section
             key={chunk.id}
-            className="lunar-section relative border-t border-cyan-500/10 px-6 py-16 md:px-12 md:py-24"
+            className="lunar-section relative z-[2] border-t border-cyan-500/10 px-6 py-16 md:px-12 md:py-24"
           >
             <ChapterLayout
               theme={CHAPTER_THEME}
