@@ -56,7 +56,7 @@ These protect today's live app and need only Supabase SQL or token changes. Owne
 
 ## Decision needed from the owner
 
-- **Branding (UI-05):** every case study gets a fixed WarpDrive "Company" paragraph and sites publish to `warpdrive-*.vercel.app`. That conflicts with D-011 (no WarpDrive branding in Scotty work) if this tool is used for Scotty implementations.
+- **Branding (UI-05): decided 04 Nov 2026.** The tool is WarpDrive-only, so the WarpDrive "Company" paragraph, `warpdrive-*.vercel.app` addresses and voice sample stay. It is not to be used for Scotty implementations (D-011).
 - Who may sign up (invite-only vs email domain).
 - Whether to run Phase 0 on the live database now, ahead of any code changes.
 
