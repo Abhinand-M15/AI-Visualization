@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
+import { apiErrorResponse } from "@/lib/server/errors";
 import { getSupabase } from "@/lib/db";
-import { authEnabled, requireUser, unauthorizedResponse } from "@/lib/auth/session";
+import { authEnabled, requireUser } from "@/lib/auth/session";
 import {
   DOCUMENTS_BUCKET,
   MAX_UPLOAD_BYTES,
@@ -68,12 +69,6 @@ export async function POST(request: Request) {
       token: data.token,
     } satisfies UploadTicket);
   } catch (error) {
-    const unauthorized = unauthorizedResponse(error);
-    if (unauthorized) return unauthorized;
-    console.error("create upload url failed:", error);
-    return NextResponse.json(
-      { error: error instanceof Error ? error.message : "Unexpected error" },
-      { status: 500 }
-    );
+    return apiErrorResponse(error, "create upload url");
   }
 }

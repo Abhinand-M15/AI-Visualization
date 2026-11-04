@@ -1,6 +1,5 @@
 "use client";
 
-import Link from "next/link";
 import { use, useEffect, useState } from "react";
 import type { Chunk, Project } from "@/lib/types";
 import { AVATARS, type Avatar } from "@/lib/avatars";
@@ -10,6 +9,8 @@ import { TEMPLATE_UNAVAILABLE_MESSAGE } from "@/lib/templates";
 import { useAvailableTemplates } from "@/lib/useAvailableTemplates";
 import { applySectionImages, caseStudySectionsAsChunks, flattenCaseStudySections } from "@/lib/caseStudySections";
 import { resolvePreviewAvatars } from "./actions";
+import { PreviewBar, PreviewMessage } from "@/components/PreviewBar";
+import { errorMessage, requestJson } from "@/components/apiError";
 
 export default function PreviewPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
@@ -20,13 +21,9 @@ export default function PreviewPage({ params }: { params: Promise<{ id: string }
   const { isAvailable: isTemplateAvailable } = useAvailableTemplates();
 
   useEffect(() => {
-    fetch(`/api/projects/${id}`)
-      .then((res) => res.json())
-      .then((data) => {
-        if (data.error) throw new Error(data.error);
-        setProject(data.project);
-      })
-      .catch((err) => setError(err instanceof Error ? err.message : "Failed to load project."));
+    requestJson<{ project: Project }>(`/api/projects/${id}`, { cache: "no-store" }, "This story couldn't be loaded.")
+      .then((data) => setProject(data.project))
+      .catch((err) => setError(errorMessage(err, "This story couldn't be loaded.")));
   }, [id]);
 
   const otherAvatarIds = (project?.selectedAvatarIds ?? []).filter((avatarId) => !AVATARS.some((avatar) => avatar.id === avatarId));
@@ -48,18 +45,14 @@ export default function PreviewPage({ params }: { params: Promise<{ id: string }
 
   if (error) {
     return (
-      <main className="mx-auto max-w-3xl px-6 py-16">
-        <p className="text-sm text-red-600">{error}</p>
-      </main>
+      <PreviewMessage projectId={id} tone="error">
+        {error} Reload the page to try again.
+      </PreviewMessage>
     );
   }
 
   if (!project || (otherKey && extraAvatars === null)) {
-    return (
-      <main className="mx-auto max-w-3xl px-6 py-16">
-        <p className="text-sm text-neutral-500">Loading…</p>
-      </main>
-    );
+    return <PreviewMessage projectId={id}>Loading the preview…</PreviewMessage>;
   }
 
   // Static ids resolve locally (unchanged); domain ids come from the server.
@@ -77,22 +70,16 @@ export default function PreviewPage({ params }: { params: Promise<{ id: string }
   const isCaseStudy = project.documentType === "case-study";
   const caseStudySections = isCaseStudy ? flattenCaseStudySections(project.caseStudyBinding?.slots ?? null) : [];
 
-  const backLink = (
-    <div className={`fixed left-4 z-50 ${logoUrl ? "top-[76px]" : "top-4"}`}>
-      <Link
-        href={`/projects/${id}`}
-        className="rounded-full bg-black/60 px-4 py-2 text-xs font-medium text-white backdrop-blur hover:bg-black/80"
-      >
-        ← Back to project
-      </Link>
-    </div>
-  );
+  const backLink = <PreviewBar projectId={id} />;
+  // Showcase draws its own lead character, so it previews without an avatar (UX-05).
+  const showcase = project.selectedTemplateId === "showcase" && isTemplateAvailable("showcase");
+  const hasAvatars = avatars.length > 0 || showcase;
 
   // Voyage and Showcase are chunk-based, so a case study shows its sections as their chapters.
   const chunkBasedCaseStudy =
     (project.selectedTemplateId === "voyage" || project.selectedTemplateId === "showcase") &&
     isTemplateAvailable(project.selectedTemplateId);
-  if (isCaseStudy && chunkBasedCaseStudy && caseStudySections.length > 0 && avatars.length > 0) {
+  if (isCaseStudy && chunkBasedCaseStudy && caseStudySections.length > 0 && hasAvatars) {
     const ChunkTemplate = TEMPLATE_COMPONENTS[project.selectedTemplateId as string];
     return (
       <div>
@@ -116,15 +103,11 @@ export default function PreviewPage({ params }: { params: Promise<{ id: string }
   if (isCaseStudy) {
     if (caseStudySections.length === 0 || avatars.length === 0) {
       return (
-        <main className="mx-auto max-w-3xl px-6 py-16">
-          <Link href={`/projects/${id}`} className="text-sm text-neutral-500 hover:underline">
-            ← Back to project
-          </Link>
-          <p className="mt-6 text-sm text-neutral-600">
-            Generate the case study layout and select at least one avatar on the project page first, then come back
-            here to preview.
-          </p>
-        </main>
+        <PreviewMessage projectId={id}>
+          {caseStudySections.length === 0
+            ? "Make the case study layout on the project page first (step 1), then reload this preview."
+            : "Choose an avatar on the project page first (step 2), then reload this preview."}
+        </PreviewMessage>
       );
     }
 
@@ -153,28 +136,18 @@ export default function PreviewPage({ params }: { params: Promise<{ id: string }
 
   const templateGone = Boolean(project.selectedTemplateId) && !isTemplateAvailable(project.selectedTemplateId);
   if (templateGone) {
-    return (
-      <main className="mx-auto max-w-3xl px-6 py-16">
-        <Link href={`/projects/${id}`} className="text-sm text-neutral-500 hover:underline">
-          ← Back to project
-        </Link>
-        <p className="mt-6 text-sm text-amber-700 dark:text-amber-300">{TEMPLATE_UNAVAILABLE_MESSAGE}</p>
-      </main>
-    );
+    return <PreviewMessage projectId={id}>{TEMPLATE_UNAVAILABLE_MESSAGE}</PreviewMessage>;
   }
 
   const Template = project.selectedTemplateId ? TEMPLATE_COMPONENTS[project.selectedTemplateId] : undefined;
 
-  if (!Template || avatars.length === 0) {
+  if (!Template || !hasAvatars) {
     return (
-      <main className="mx-auto max-w-3xl px-6 py-16">
-        <Link href={`/projects/${id}`} className="text-sm text-neutral-500 hover:underline">
-          ← Back to project
-        </Link>
-        <p className="mt-6 text-sm text-neutral-600">
-          Select at least one avatar and a template on the project page first, then come back here to preview.
-        </p>
-      </main>
+      <PreviewMessage projectId={id}>
+        {!Template
+          ? "Choose a template on the project page first (step 2), then reload this preview."
+          : "Choose an avatar on the project page first (step 2), then reload this preview."}
+      </PreviewMessage>
     );
   }
 

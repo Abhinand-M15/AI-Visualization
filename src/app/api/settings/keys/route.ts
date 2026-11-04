@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
-import { requireUser, unauthorizedResponse } from "@/lib/auth/session";
+import { apiErrorResponse } from "@/lib/server/errors";
+import { requireUser } from "@/lib/auth/session";
 import { deleteUserKey, getKeyStatus, isKeyProvider, saveUserKey } from "@/lib/userKeys";
 import { logActivity } from "@/lib/activity";
 
@@ -15,13 +16,7 @@ import { logActivity } from "@/lib/activity";
 const ACCOUNTS_OFF = "Accounts are turned off, so the server uses GEMINI_API_KEY from its environment.";
 
 function errorResponse(error: unknown, label: string) {
-  const unauthorized = unauthorizedResponse(error);
-  if (unauthorized) return unauthorized;
-  console.error(`${label} failed:`, error instanceof Error ? error.message : error);
-  return NextResponse.json(
-    { error: error instanceof Error ? error.message : "Unexpected error" },
-    { status: 500 }
-  );
+  return apiErrorResponse(error, label);
 }
 
 export async function GET() {

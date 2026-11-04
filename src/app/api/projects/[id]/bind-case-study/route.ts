@@ -2,14 +2,20 @@ import { NextResponse } from "next/server";
 import { getSupabase } from "@/lib/db";
 import { buildPayload, PROJECT_SELECT_COLUMNS, rowToProject, updatedByFields, type ProjectRow } from "@/lib/projects";
 import { bindCaseStudyLayout } from "@/lib/agent/bindCaseStudyLayout";
-import { requireUser, unauthorizedResponse } from "@/lib/auth/session";
-import { getGeminiKeyFor, missingApiKeyResponse } from "@/lib/userKeys";
+import { requireUser } from "@/lib/auth/session";
+import { getGeminiKeyFor } from "@/lib/userKeys";
 import { logActivity } from "@/lib/activity";
+import type { CaseStudyBinding } from "@/lib/types";
+import { apiErrorResponse } from "@/lib/server/errors";
+import { isValidProjectId } from "@/lib/server/ids";
+import { requireQuota } from "@/lib/server/quota";
+import { updateLatestProject } from "@/lib/server/projectWrites";
 
 export async function POST(_request: Request, context: { params: Promise<{ id: string }> }) {
   try {
     const user = await requireUser();
     const { id } = await context.params;
+    if (!isValidProjectId(id)) return NextResponse.json({ error: "Project not found.", code: "not_found" }, { status: 404 });
     const supabase = getSupabase();
 
     let fetchQuery = supabase.from("projects").select(PROJECT_SELECT_COLUMNS).eq("id", id);
@@ -18,47 +24,43 @@ export async function POST(_request: Request, context: { params: Promise<{ id: s
 
     if (fetchError) throw new Error(fetchError.message);
     if (!existing) {
-      return NextResponse.json({ error: "Project not found." }, { status: 404 });
+      return NextResponse.json({ error: "Project not found.", code: "not_found" }, { status: 404 });
     }
 
     const project = rowToProject(existing as unknown as ProjectRow);
     if (project.documentType !== "case-study") {
       return NextResponse.json(
-        { error: "Layout binding is only available for case-study projects." },
+        { error: "Layout binding is only available for case-study projects.", code: "bad_request" },
         { status: 400 }
       );
     }
 
     const apiKey = await getGeminiKeyFor(user);
+    await requireQuota(user, "generation");
     const result = await bindCaseStudyLayout(project.title, project.chunks, apiKey);
-    const caseStudyBinding = {
-      templateContractId: result.templateContractId,
-      slots: result.slots,
-      diagnostics: result.diagnostics,
-      boundAt: new Date().toISOString(),
-    };
+    const boundAt = new Date().toISOString();
+    const boundText = JSON.stringify(project.chunks.map((chunk) => [chunk.id, chunk.title, chunk.narrativeText]));
 
-    let updateQuery = supabase
-      .from("projects")
-      .update({
-        payload: buildPayload(project, { chunks: project.chunks, caseStudyBinding }),
-        updated_at: new Date().toISOString(),
-        ...updatedByFields(user),
-      })
-      .eq("id", id);
-    if (user) updateQuery = updateQuery.eq("owner_id", user.id);
-    const { data: updated, error: updateError } = await updateQuery.select(PROJECT_SELECT_COLUMNS).single();
+    // Saved onto the latest row: chapters edited while Gemini worked are kept, and the
+    // new layout is marked as behind them (UX-02, AR-09).
+    const updated = await updateLatestProject(id, user?.id ?? null, (latest) => {
+      const latestText = JSON.stringify(latest.chunks.map((chunk) => [chunk.id, chunk.title, chunk.narrativeText]));
+      const caseStudyBinding: CaseStudyBinding = {
+        templateContractId: result.templateContractId,
+        slots: result.slots,
+        diagnostics: result.diagnostics,
+        boundAt,
+        ...(latestText !== boundText ? { chunksChangedAt: new Date().toISOString() } : {}),
+      };
+      return {
+        payload: buildPayload(latest, { chunks: latest.chunks, caseStudyBinding }),
+        columns: updatedByFields(user),
+      };
+    });
 
-    if (updateError) throw new Error(updateError.message);
     await logActivity(user, id, "layout.bound", { templateContractId: result.templateContractId });
-    return NextResponse.json({ project: rowToProject(updated as unknown as ProjectRow) });
+    return NextResponse.json({ project: rowToProject(updated) });
   } catch (error) {
-    const handled = unauthorizedResponse(error) ?? missingApiKeyResponse(error);
-    if (handled) return handled;
-    console.error("bind-case-study failed:", error);
-    return NextResponse.json(
-      { error: error instanceof Error ? error.message : "Unexpected error" },
-      { status: 500 }
-    );
+    return apiErrorResponse(error, "bind-case-study");
   }
 }

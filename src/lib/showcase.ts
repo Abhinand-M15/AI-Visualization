@@ -1,5 +1,6 @@
 import type { Chunk, EmotionKey } from "@/lib/types";
 import { avatarVideoFallbackUrl, getAvatarImage, type Avatar } from "@/lib/avatars";
+import { safeUrl } from "@/components/templates/storyMedia";
 
 /**
  * Shared data for the Showcase template. One pure view-model builder feeds both
@@ -218,8 +219,12 @@ export interface BuildShowcaseOptions {
 
 export function buildShowcaseStory(options: BuildShowcaseOptions): ShowcaseStory {
   const { title, chunks, avatars } = options;
-  const url = options.assetUrl ?? ((path: string) => path);
-  const audioOf = options.audioUrl ?? ((chunk: Chunk) => chunk.audioUrl || undefined);
+  // Every URL the page will load is allow-listed (https, local dev http, or a
+  // relative bundle path); anything else is dropped rather than rendered.
+  const assetUrl = options.assetUrl ?? ((path: string) => path);
+  const url = (path: string): string | undefined => safeUrl(assetUrl(path)) || undefined;
+  const audioOf = (chunk: Chunk): string | undefined =>
+    safeUrl(options.audioUrl ? options.audioUrl(chunk) : chunk.audioUrl) || undefined;
 
   const chapters = chunks.map<ShowcaseChapter>((chunk, index) => {
     const hue = showcaseHue(index);
@@ -235,7 +240,7 @@ export function buildShowcaseStory(options: BuildShowcaseOptions): ShowcaseStory
     const altImage = avatar ? url(getAvatarImage(avatar, altEmotion)) : undefined;
 
     const videos = avatar?.videoUrls ?? [];
-    const videoPath = videos.length > 0 ? videos[index % videos.length] : undefined;
+    const videoPath = videos.length > 0 && url(videos[index % videos.length]) ? videos[index % videos.length] : undefined;
     const fallbackPath = videoPath ? avatarVideoFallbackUrl(videoPath) : undefined;
 
     const alt = (n: number) => `${chunk.title} picture ${n}`;
@@ -297,7 +302,7 @@ export function buildShowcaseStory(options: BuildShowcaseOptions): ShowcaseStory
     chapters,
     narrated: chapters.some((chapter) => Boolean(chapter.audioUrl)),
     assetBase: options.assetBase ?? SHOWCASE_ASSET_ROOT,
-    ...(options.logoUrl ? { logoUrl: options.logoUrl } : {}),
+    ...(safeUrl(options.logoUrl) ? { logoUrl: safeUrl(options.logoUrl) } : {}),
   };
 }
 

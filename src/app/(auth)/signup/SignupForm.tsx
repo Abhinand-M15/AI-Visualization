@@ -2,142 +2,97 @@
 
 import Link from "next/link";
 import { useState, type FormEvent } from "react";
-import { authCallbackUrl, getSupabaseBrowserClient } from "@/lib/auth/client";
-import { friendlyAuthError } from "@/lib/auth/errors";
+import type { SignupStatus } from "@/lib/auth/availability";
 import { validateNewPassword } from "@/lib/auth/password";
+import { ApiError, errorMessage, requestJson } from "@/components/apiError";
 import { PasswordField } from "../_components/PasswordField";
-import {
-  AuthCard,
-  AuthUnavailable,
-  Notice,
-  TextField,
-  linkClass,
-  primaryButtonClass,
-  secondaryButtonClass,
-} from "../_components/ui";
+import { AuthCard, AuthUnavailable, Notice, TextField, linkClass, primaryButtonClass } from "../_components/ui";
 
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
-/** First stop after sign-up: Settings, where the user adds their Gemini key (agent B's page). */
+/** First stop after sign-up: Settings, where the user adds their Gemini key. */
 const ONBOARDING_PATH = "/settings?onboarding=1";
 
-export function SignupForm({ next, unavailableReason }: { next: string; unavailableReason: string | null }) {
+interface SignupReply {
+  ok: boolean;
+  signedIn: boolean;
+  next?: string;
+}
+
+/**
+ * Sign-up through the app's own route (POST /api/auth/signup), which checks
+ * the allow-list and creates the account without any confirmation email, then
+ * signs the user in. When sign-up is closed (invite only, accounts off) the
+ * form says so instead of offering fields that can't work.
+ */
+export function SignupForm({
+  next,
+  unavailableReason,
+  status,
+}: {
+  next: string;
+  unavailableReason: string | null;
+  status: SignupStatus;
+}) {
   const [displayName, setDisplayName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [confirm, setConfirm] = useState("");
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [sentTo, setSentTo] = useState<string | null>(null);
-  const [resend, setResend] = useState<"idle" | "sending" | "sent">("idle");
+  const [error, setError] = useState<{ message: string; code?: string } | null>(null);
 
-  const disabled = Boolean(unavailableReason) || busy;
+  const closed = !status.open;
+  const disabled = Boolean(unavailableReason) || closed || busy;
   const loginHref = next === "/" ? "/login" : `/login?next=${encodeURIComponent(next)}`;
   const passwordsMismatch = confirm.length > 0 && password !== confirm;
+  const domainHint = status.allowedDomains?.length
+    ? `Use your ${status.allowedDomains.map((domain) => `@${domain}`).join(" or ")} email address.`
+    : undefined;
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const supabase = getSupabaseBrowserClient();
-    if (!supabase) return;
-
+    if (disabled) return;
     const name = displayName.trim();
     const address = email.trim();
-    if (!name) return setError("Please enter a display name.");
-    if (!EMAIL_PATTERN.test(address)) return setError("Please enter a valid email address.");
+    if (!name) return setError({ message: "Please enter a display name." });
+    if (!EMAIL_PATTERN.test(address)) return setError({ message: "Please enter a valid email address." });
     const passwordProblem = validateNewPassword(password, confirm);
-    if (passwordProblem) return setError(passwordProblem);
+    if (passwordProblem) return setError({ message: passwordProblem });
 
     setBusy(true);
     setError(null);
     try {
-      const { data, error: signUpError } = await supabase.auth.signUp({
-        email: address,
-        password,
-        options: {
-          data: { display_name: name },
-          emailRedirectTo: authCallbackUrl(next),
+      const reply = await requestJson<SignupReply>(
+        "/api/auth/signup",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ email: address, password, displayName: name }),
         },
-      });
-      if (signUpError) throw signUpError;
-      if (data.session) {
-        // "Confirm email" is off in Supabase, so the user is already signed in.
-        // Full page load (lets the browser offer to save the password and the
-        // server see the new cookie) straight to the Gemini-key onboarding step.
-        // eslint-disable-next-line @next/next/no-location-assign-relative-destination
-        window.location.assign(ONBOARDING_PATH);
+        "Your account couldn't be created. Try again."
+      );
+      if (reply.signedIn) {
+        // Full page load so the server (proxy, layout, account menu) sees the new session,
+        // straight to the Gemini-key onboarding step.
+        window.location.assign(reply.next && reply.next.startsWith("/") ? reply.next : ONBOARDING_PATH);
         return;
       }
-      // Fallback: confirmation is on, so no session until the email link is opened.
-      setSentTo(address);
+      // Account made, but the automatic log-in didn't happen: log in by hand.
+      const params = new URLSearchParams({ message: "account_created" });
+      if (next !== "/") params.set("next", next);
+      // eslint-disable-next-line @next/next/no-location-assign-relative-destination -- full load, like the signed-in path
+      window.location.assign(`/login?${params}`);
     } catch (err) {
-      setError(friendlyAuthError(err).message);
+      setError({ message: errorMessage(err, "Your account couldn't be created. Try again."), code: err instanceof ApiError ? err.code : undefined });
     } finally {
       setBusy(false);
     }
   }
 
-  async function handleResend() {
-    const supabase = getSupabaseBrowserClient();
-    if (!supabase || !sentTo) return;
-    setResend("sending");
-    setError(null);
-    try {
-      const { error: resendError } = await supabase.auth.resend({
-        type: "signup",
-        email: sentTo,
-        options: { emailRedirectTo: authCallbackUrl(next) },
-      });
-      if (resendError) throw resendError;
-      setResend("sent");
-    } catch (err) {
-      setError(friendlyAuthError(err).message);
-      setResend("idle");
-    }
-  }
-
-  if (sentTo) {
-    return (
-      <AuthCard
-        title="Check your email"
-        subtitle={
-          <>
-            We sent a confirmation link to <span className="font-medium text-neutral-800 dark:text-white">{sentTo}</span>.
-            Open it to activate your account, then log in.
-          </>
-        }
-        footer={
-          <Link href={loginHref} className={linkClass}>
-            Back to log in
-          </Link>
-        }
-      >
-        <div className="flex flex-col gap-4">
-          <Notice tone="info">
-            Didn&apos;t get it? Check your spam folder. If you already have an account with this email, log in
-            instead.
-          </Notice>
-          {error && <Notice tone="error">{error}</Notice>}
-          {resend === "sent" ? (
-            <Notice tone="success">A new confirmation email is on its way.</Notice>
-          ) : (
-            <button
-              type="button"
-              onClick={handleResend}
-              disabled={resend === "sending"}
-              className={`${secondaryButtonClass} self-start`}
-            >
-              {resend === "sending" ? "Sending…" : "Resend confirmation email"}
-            </button>
-          )}
-        </div>
-      </AuthCard>
-    );
-  }
-
   return (
     <AuthCard
       title="Create your account"
-      subtitle="Your email is your username. We'll send a link to confirm it."
+      subtitle={closed ? undefined : "Your email is your username."}
       footer={
         <>
           Already have an account?{" "}
@@ -148,65 +103,87 @@ export function SignupForm({ next, unavailableReason }: { next: string; unavaila
       }
     >
       {/* A real POST form with name/id + autocomplete so browsers offer to save the new password. */}
-      <form method="post" onSubmit={handleSubmit} className="flex flex-col gap-5">
-        {unavailableReason && <AuthUnavailable reason={unavailableReason} />}
-        {error && <Notice tone="error">{error}</Notice>}
+      <form method="post" onSubmit={handleSubmit} className="flex flex-col gap-5" noValidate>
+        {unavailableReason ? (
+          <AuthUnavailable reason={unavailableReason} />
+        ) : (
+          closed && <AuthUnavailable reason={status.message ?? "New sign-ups are turned off. Ask your admin to add you."} />
+        )}
+        {error && (
+          <Notice tone="error">
+            <p>{error.message}</p>
+            {error.code === "user_exists" && (
+              <p className="mt-2">
+                <Link href={loginHref} className={linkClass}>
+                  Log in instead
+                </Link>
+              </p>
+            )}
+          </Notice>
+        )}
 
-        <TextField
-          id="displayName"
-          label="Display name"
-          type="text"
-          autoComplete="name"
-          maxLength={80}
-          required
-          value={displayName}
-          onChange={(event) => setDisplayName(event.target.value)}
-          disabled={disabled}
-          hint="Shown in the app. You can use your full name or a nickname."
-        />
+        {!closed && (
+          <>
+            <TextField
+              id="displayName"
+              label="Display name"
+              type="text"
+              autoComplete="name"
+              maxLength={80}
+              required
+              value={displayName}
+              onChange={(event) => setDisplayName(event.target.value)}
+              disabled={disabled}
+              hint="Shown in the app. You can use your full name or a nickname."
+            />
 
-        <TextField
-          id="email"
-          label="Email"
-          type="email"
-          inputMode="email"
-          autoComplete="username"
-          autoCapitalize="none"
-          spellCheck={false}
-          required
-          value={email}
-          onChange={(event) => setEmail(event.target.value)}
-          disabled={disabled}
-        />
+            <TextField
+              id="email"
+              label="Email"
+              type="email"
+              inputMode="email"
+              autoComplete="username"
+              autoCapitalize="none"
+              spellCheck={false}
+              required
+              value={email}
+              onChange={(event) => setEmail(event.target.value)}
+              disabled={disabled}
+              aria-invalid={error?.code === "email_not_allowed" || error?.code === "invalid_email" || undefined}
+              hint={domainHint}
+            />
 
-        <PasswordField
-          id="password"
-          label="Password"
-          value={password}
-          onChange={setPassword}
-          autoComplete="new-password"
-          showStrength
-          disabled={disabled}
-        />
+            <PasswordField
+              id="password"
+              label="Password"
+              value={password}
+              onChange={setPassword}
+              autoComplete="new-password"
+              showStrength
+              disabled={disabled}
+              invalid={error?.code === "weak_password"}
+            />
 
-        <div>
-          <PasswordField
-            id="confirmPassword"
-            label="Confirm password"
-            value={confirm}
-            onChange={setConfirm}
-            autoComplete="new-password"
-            disabled={disabled}
-            invalid={passwordsMismatch}
-          />
-          {passwordsMismatch && (
-            <p className="mt-2 text-xs text-red-600 dark:text-red-300">The two passwords don&apos;t match yet.</p>
-          )}
-        </div>
+            <div>
+              <PasswordField
+                id="confirmPassword"
+                label="Confirm password"
+                value={confirm}
+                onChange={setConfirm}
+                autoComplete="new-password"
+                disabled={disabled}
+                invalid={passwordsMismatch}
+              />
+              {passwordsMismatch && (
+                <p className="mt-2 text-xs text-red-700 dark:text-red-300">The two passwords don&apos;t match yet.</p>
+              )}
+            </div>
 
-        <button type="submit" disabled={disabled} className={primaryButtonClass}>
-          {busy ? "Creating account…" : "Create account"}
-        </button>
+            <button type="submit" disabled={disabled} className={primaryButtonClass}>
+              {busy ? "Creating account…" : "Create account"}
+            </button>
+          </>
+        )}
       </form>
     </AuthCard>
   );

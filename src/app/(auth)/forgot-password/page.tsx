@@ -5,7 +5,7 @@ import { CALLBACK_ERROR_MESSAGES } from "@/lib/auth/errors";
 import { firstParam, type AuthSearchParams } from "../_components/searchParams";
 import { ForgotPasswordForm } from "./ForgotPasswordForm";
 
-export const metadata: Metadata = { title: "Forgot password · Story Site Generator" };
+export const metadata: Metadata = { title: "Forgot password" };
 
 export default async function ForgotPasswordPage({ searchParams }: { searchParams: AuthSearchParams }) {
   // Self-service reset is off unless AUTH_PASSWORD_RESET=1 (no emails are sent).

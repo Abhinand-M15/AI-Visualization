@@ -4,7 +4,7 @@ import { authUnavailableReason, passwordResetEnabled } from "@/lib/auth/availabi
 import { getCurrentUser } from "@/lib/auth/session";
 import { ResetPasswordForm } from "./ResetPasswordForm";
 
-export const metadata: Metadata = { title: "Set a new password · Story Site Generator" };
+export const metadata: Metadata = { title: "Set a new password" };
 
 export default async function ResetPasswordPage() {
   // Only reachable from a reset email, which is only sent when AUTH_PASSWORD_RESET=1.

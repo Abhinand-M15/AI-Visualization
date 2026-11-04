@@ -1,6 +1,8 @@
 import { NextResponse } from "next/server";
 import { getSupabase } from "@/lib/db";
-import { requireUser, unauthorizedResponse } from "@/lib/auth/session";
+import { requireUser } from "@/lib/auth/session";
+import { apiErrorResponse } from "@/lib/server/errors";
+import { chunkAudioPath, isValidChunkId, isValidProjectId } from "@/lib/server/ids";
 
 const AUDIO_BUCKET = "chunk-audio";
 
@@ -11,6 +13,9 @@ export async function GET(
   try {
     const user = await requireUser();
     const { id, chunkId } = await context.params;
+    if (!isValidProjectId(id) || !isValidChunkId(chunkId)) {
+      return NextResponse.json({ error: "Not found.", code: "not_found" }, { status: 404 });
+    }
     const supabase = getSupabase();
 
     if (user) {
@@ -24,7 +29,7 @@ export async function GET(
       if (!owned) return NextResponse.json({ error: "Project not found." }, { status: 404 });
     }
 
-    const path = `${id}/${chunkId}.mp3`;
+    const path = chunkAudioPath(id, chunkId);
     const { data } = supabase.storage.from(AUDIO_BUCKET).getPublicUrl(path);
     if (!data?.publicUrl) {
       return NextResponse.json({ error: "Audio not found for this chunk." }, { status: 404 });
@@ -32,12 +37,6 @@ export async function GET(
 
     return NextResponse.redirect(data.publicUrl);
   } catch (error) {
-    const unauthorized = unauthorizedResponse(error);
-    if (unauthorized) return unauthorized;
-    console.error("get chunk audio failed:", error);
-    return NextResponse.json(
-      { error: error instanceof Error ? error.message : "Unexpected error" },
-      { status: 500 }
-    );
+    return apiErrorResponse(error, "get chunk audio");
   }
 }

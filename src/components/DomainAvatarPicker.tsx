@@ -7,6 +7,7 @@
  */
 import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
+import { friendlyMessage, isKeyProblem } from "@/components/apiError";
 
 export interface DomainAvatarPickerProps {
   domainId: string;
@@ -41,26 +42,35 @@ export default function DomainAvatarPicker({ domainId, value, onSelect }: Domain
   const [retrying, setRetrying] = useState(false);
   const requestRef = useRef(0);
 
+  /** "read": GET, read only (polling). "generate" / "retry": POST, which makes missing (and with retry, failed) avatars. */
   const load = useCallback(
-    async (query: string) => {
+    async (mode: "read" | "generate" | "retry") => {
       const ticket = ++requestRef.current;
       try {
-        const res = await fetch(`/api/domains/${encodeURIComponent(domainId)}/avatars${query}`, { cache: "no-store" });
+        const url = `/api/domains/${encodeURIComponent(domainId)}/avatars`;
+        const res =
+          mode === "read"
+            ? await fetch(`${url}?generate=0`, { cache: "no-store" })
+            : await fetch(url, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ retry: mode === "retry" }),
+              });
         const data = (await res.json().catch(() => ({}))) as {
           avatars?: AvatarItem[];
           error?: string;
           code?: string;
         };
         if (ticket !== requestRef.current) return;
-        if (res.status === 412 && data.code === "missing_api_key") {
-          setState({ kind: "missing-key", message: data.error || "Add your API key in Settings to generate avatars." });
+        if (isKeyProblem(data.code)) {
+          setState({ kind: "missing-key", message: friendlyMessage(data.error, data.code, res.status) });
         } else if (!res.ok) {
-          setState({ kind: "error", message: data.error || "Could not load the avatars." });
+          setState({ kind: "error", message: friendlyMessage(data.error, data.code, res.status, "The avatars couldn't be loaded.") });
         } else {
           setState({ kind: "ready", avatars: Array.isArray(data.avatars) ? data.avatars : [] });
         }
       } catch {
-        if (ticket === requestRef.current) setState({ kind: "error", message: "Could not load the avatars." });
+        if (ticket === requestRef.current) setState({ kind: "error", message: "Couldn't reach the server. Check your connection and try again." });
       }
     },
     [domainId, setState]
@@ -71,7 +81,7 @@ export default function DomainAvatarPicker({ domainId, value, onSelect }: Domain
   }, []);
 
   useEffect(() => {
-    const timer = setTimeout(() => void load(""), 0);
+    const timer = setTimeout(() => void load("generate"), 0);
     return () => {
       clearTimeout(timer);
       invalidate();
@@ -82,14 +92,14 @@ export default function DomainAvatarPicker({ domainId, value, onSelect }: Domain
   const hasPending = state.kind === "ready" && state.avatars.some((a) => a.status === "pending");
   useEffect(() => {
     if (!hasPending) return;
-    const timer = setInterval(() => void load("?generate=0"), POLL_MS);
+    const timer = setInterval(() => void load("read"), POLL_MS);
     return () => clearInterval(timer);
   }, [hasPending, load]);
 
   async function retry() {
     setRetrying(true);
     setState({ kind: "loading" });
-    await load("?retry=1");
+    await load("retry");
     setRetrying(false);
   }
 
@@ -99,7 +109,7 @@ export default function DomainAvatarPicker({ domainId, value, onSelect }: Domain
   const heading = (
     <div>
       <p className="text-xs font-semibold text-neutral-800 dark:text-indigo-100">Industry avatars</p>
-      <p className="text-xs text-neutral-500 dark:text-indigo-200/50">Made for this story&apos;s domain.</p>
+      <p className="text-xs text-muted-foreground">Made for this story&apos;s domain.</p>
     </div>
   );
 
@@ -107,7 +117,7 @@ export default function DomainAvatarPicker({ domainId, value, onSelect }: Domain
     return (
       <div className="flex flex-col gap-2">
         {heading}
-        <p className="text-xs text-neutral-500 dark:text-indigo-200/60" role="status">
+        <p className="text-xs text-muted-foreground" role="status">
           {retrying ? "Retrying" : "Preparing"} the industry avatars. On first use this can take a minute…
         </p>
       </div>
@@ -132,12 +142,12 @@ export default function DomainAvatarPicker({ domainId, value, onSelect }: Domain
     return (
       <div className="flex flex-col gap-2">
         {heading}
-        <p className="text-xs text-red-600 dark:text-red-400">{state.message}</p>
+        <p className="text-xs text-red-700 dark:text-red-300">{state.message}</p>
         <button
           type="button"
           onClick={() => {
             setState({ kind: "loading" });
-            void load("");
+            void load("generate");
           }}
           className="self-start rounded-lg border border-neutral-200 bg-neutral-50 px-3 py-1 text-xs font-medium text-neutral-700 hover:bg-neutral-100 dark:border-white/10 dark:bg-white/5 dark:text-indigo-100 dark:hover:bg-white/10"
         >
@@ -198,7 +208,7 @@ export default function DomainAvatarPicker({ domainId, value, onSelect }: Domain
               role="status"
             >
               <span className="h-12 w-12 animate-pulse rounded-lg bg-neutral-200 dark:bg-white/10" />
-              <span className="text-neutral-500 dark:text-indigo-200/60">{label}: generating…</span>
+              <span className="text-muted-foreground">{label}: generating…</span>
             </div>
           );
         })}

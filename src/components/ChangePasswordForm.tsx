@@ -7,6 +7,7 @@ import { getSupabaseBrowserClient } from "@/lib/auth/client";
 import { publicAuthConfig } from "@/lib/auth/config";
 import { friendlyAuthError } from "@/lib/auth/errors";
 import { validateNewPassword } from "@/lib/auth/password";
+import { cardClass } from "@/components/ui/button";
 
 type LoadState = { status: "loading" } | { status: "unavailable" } | { status: "ready"; email: string };
 
@@ -100,19 +101,19 @@ export function ChangePasswordForm() {
   return (
     <section
       aria-labelledby="change-password-heading"
-      className="flex flex-col gap-5 rounded-3xl border border-neutral-200 bg-white p-6 shadow-sm sm:p-8 dark:border-white/10 dark:bg-white/[0.03] dark:shadow-[0_0_60px_rgba(99,102,241,0.08)] dark:backdrop-blur-sm"
+      className={`${cardClass} flex flex-col gap-5 p-5 sm:p-6`}
     >
       <div>
-        <h2 id="change-password-heading" className="text-xl font-semibold tracking-tight">
+        <h2 id="change-password-heading" className="text-section font-semibold">
           Change password
         </h2>
-        <p className="mt-1 text-sm text-neutral-500 dark:text-indigo-200/70">
+        <p className="mt-1 text-sm text-muted-foreground">
           Enter your current password, then choose a new one.
         </p>
       </div>
 
       {load.status === "unavailable" && (
-        <Notice tone="info">Sign in to change your password. (Accounts may be switched off for this app.)</Notice>
+        <Notice tone="info">Log in to change your password. (Accounts may be switched off for this app.)</Notice>
       )}
 
       <form method="post" onSubmit={handleSubmit} className="flex flex-col gap-5">

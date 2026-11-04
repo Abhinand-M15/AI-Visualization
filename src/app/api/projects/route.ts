@@ -12,16 +12,23 @@ import {
 } from "@/lib/projects";
 import { getDomain } from "@/lib/domains";
 import { pathBelongsTo } from "@/app/api/logos/server";
-import type { Chunk, DocumentType } from "@/lib/types";
+import { DOCUMENT_TYPES, type Chunk, type DocumentType } from "@/lib/types";
 import { bindCaseStudyLayout } from "@/lib/agent/bindCaseStudyLayout";
-import { requireUser, unauthorizedResponse } from "@/lib/auth/session";
+import { requireUser } from "@/lib/auth/session";
 import { getGeminiKeyFor } from "@/lib/userKeys";
 import { logActivity } from "@/lib/activity";
+import { mergeChunks } from "@/lib/chunkMerge";
+import { cleanStoryTitle, validateClientChunks } from "@/lib/server/chunks";
+import { verifyLogoObject } from "@/lib/server/logos";
+import { apiErrorResponse } from "@/lib/server/errors";
+
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 interface CreateProjectBody {
   title: string;
   documentType: DocumentType;
   sourceFileName?: string;
+  /** Server-normalised chapters: validated story fields only, server ids, no audio or image fields (SEC-03/04/21). */
   chunks: Chunk[];
   /** documents.id returned by /api/parse-and-generate for a direct upload (auth on only). */
   documentId?: string;
@@ -31,14 +38,30 @@ interface CreateProjectBody {
   logoPath?: string;
 }
 
-function isCreateProjectBody(value: unknown): value is CreateProjectBody {
-  if (!value || typeof value !== "object") return false;
-  const body = value as Record<string, unknown>;
-  return (
-    typeof body.title === "string" &&
-    typeof body.documentType === "string" &&
-    Array.isArray(body.chunks)
-  );
+function parseCreateBody(value: unknown): { ok: true; body: CreateProjectBody } | { ok: false; error: string } {
+  if (!value || typeof value !== "object") return { ok: false, error: "Body must include title, documentType, and chunks." };
+  const raw = value as Record<string, unknown>;
+  const title = cleanStoryTitle(raw.title);
+  if (!title) return { ok: false, error: "The title must be 1 to 200 characters." };
+  if (typeof raw.documentType !== "string" || !DOCUMENT_TYPES.some((type) => type.value === raw.documentType)) {
+    return { ok: false, error: "Unknown document type." };
+  }
+  const validated = validateClientChunks(raw.chunks);
+  if (!validated.ok) return validated;
+  const sourceFileName =
+    typeof raw.sourceFileName === "string" && raw.sourceFileName.trim() ? raw.sourceFileName.trim().slice(0, 255) : undefined;
+  return {
+    ok: true,
+    body: {
+      title,
+      documentType: raw.documentType as DocumentType,
+      sourceFileName,
+      chunks: mergeChunks(validated.chunks, []).chunks,
+      documentId: typeof raw.documentId === "string" && UUID_PATTERN.test(raw.documentId) ? raw.documentId : undefined,
+      domainId: typeof raw.domainId === "string" && UUID_PATTERN.test(raw.domainId) ? raw.domainId : undefined,
+      logoPath: typeof raw.logoPath === "string" ? raw.logoPath : undefined,
+    },
+  };
 }
 
 export async function GET() {
@@ -56,26 +79,18 @@ export async function GET() {
       projects: (data as unknown as ProjectSummaryRow[]).map(rowToProjectSummary),
     });
   } catch (error) {
-    const unauthorized = unauthorizedResponse(error);
-    if (unauthorized) return unauthorized;
-    console.error("list projects failed:", error);
-    return NextResponse.json(
-      { error: error instanceof Error ? error.message : "Unexpected error" },
-      { status: 500 }
-    );
+    return apiErrorResponse(error, "list projects");
   }
 }
 
 export async function POST(request: Request) {
   try {
     const user = await requireUser();
-    const body = await request.json();
-    if (!isCreateProjectBody(body)) {
-      return NextResponse.json(
-        { error: "Body must include title, documentType, and chunks." },
-        { status: 400 }
-      );
+    const parsed = parseCreateBody(await request.json().catch(() => null));
+    if (!parsed.ok) {
+      return NextResponse.json({ error: parsed.error, code: "bad_request" }, { status: 400 });
     }
+    const body = parsed.body;
 
     const id = crypto.randomUUID();
     const supabase = getSupabase();
@@ -104,8 +119,15 @@ export async function POST(request: Request) {
     // Domain and company logo. Both are optional and best-effort (nothing is
     // written, and nothing fails, when they're absent or migration 003 isn't applied).
     // The domain must exist and the logo must sit in the caller's own folder.
-    const domainId = typeof body.domainId === "string" ? body.domainId : undefined;
-    const logoPath = typeof body.logoPath === "string" && pathBelongsTo(user, body.logoPath) ? body.logoPath : undefined;
+    // The logo must be in the caller's folder AND pass server verification (SEC-07):
+    // a path whose upload skipped /api/logos/sanitize is verified (or rejected) here.
+    const domainId = body.domainId;
+    let logoPath: string | undefined;
+    if (body.logoPath && pathBelongsTo(user, body.logoPath)) {
+      const verified = await verifyLogoObject(body.logoPath);
+      if (verified.ok) logoPath = verified.path;
+      else console.warn("create project: logo not attached:", verified.reason);
+    }
     let validDomainId: string | undefined;
     if (domainId) {
       try {
@@ -165,12 +187,6 @@ export async function POST(request: Request) {
 
     return NextResponse.json({ project }, { status: 201 });
   } catch (error) {
-    const unauthorized = unauthorizedResponse(error);
-    if (unauthorized) return unauthorized;
-    console.error("create project failed:", error);
-    return NextResponse.json(
-      { error: error instanceof Error ? error.message : "Unexpected error" },
-      { status: 500 }
-    );
+    return apiErrorResponse(error, "create project");
   }
 }

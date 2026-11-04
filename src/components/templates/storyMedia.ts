@@ -33,13 +33,57 @@ export const STORY_LOGO_CSS =
   `box-shadow:0 2px 10px rgba(0,0,0,.18);pointer-events:none;}` +
   `.story-logo img{display:block;max-height:${STORY_LOGO.maxHeight};max-width:${STORY_LOGO.maxWidth};width:auto;height:auto;object-fit:contain;}`;
 
-function escapeAttr(input: string): string {
+/** Escapes text for HTML text and (double- or single-quoted) attribute values. Every value a static page interpolates goes through this. */
+export function escapeHtml(input: string): string {
   return input.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+}
+
+const escapeAttr = escapeHtml;
+
+const LOCAL_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"]);
+
+/**
+ * URL allow-list for anything a published page loads (images, video, audio,
+ * logo, 3D model): `https:` URLs, `http:` only on a local dev host, and
+ * relative paths inside the deploy bundle. Anything else (javascript:, data:,
+ * protocol-relative `//host`, whitespace, quotes, angle brackets) becomes "" so
+ * the caller drops the element. The result still needs escapeHtml in an attribute.
+ */
+export function safeUrl(url: string | null | undefined): string {
+  if (!url) return "";
+  const value = url.trim();
+  // Real URLs here are generated or percent-encoded: none contains whitespace,
+  // quotes, angle brackets, backticks, backslashes or control characters.
+  if (!value || /[\u0000-\u0020\u007f"'<>`\\]/.test(value) || value.startsWith("//")) return "";
+  const scheme = /^([a-z][a-z0-9+.-]*):/i.exec(value);
+  if (!scheme) return value;
+  const name = scheme[1].toLowerCase();
+  if (name === "https") return value;
+  if (name === "http") {
+    try {
+      return LOCAL_HOSTS.has(new URL(value).hostname) ? value : "";
+    } catch {
+      return "";
+    }
+  }
+  return "";
+}
+
+/**
+ * Public Storage URL of one object, e.g. narration `chunk-audio/<project>/<chunk>.mp3`.
+ * Each path segment is percent-encoded, so an id can never add a path, a query or
+ * break out of an attribute.
+ */
+export function storagePublicUrl(supabaseUrl: string, bucket: string, ...segments: string[]): string {
+  const base = supabaseUrl.replace(/\/+$/, "");
+  return `${base}/storage/v1/object/public/${encodeURIComponent(bucket)}/${segments.map((s) => encodeURIComponent(s)).join("/")}`;
 }
 
 /** Logo markup for the static sites. `logoUrl` is a bundle-relative path or an absolute URL. */
 export function storyLogoHtml(logoUrl: string): string {
-  return `<div class="story-logo"><img src="${escapeAttr(logoUrl)}" alt="" /></div>`;
+  const src = safeUrl(logoUrl);
+  if (!src) return "";
+  return `<div class="story-logo"><img src="${escapeAttr(src)}" alt="" /></div>`;
 }
 
 /**
@@ -47,7 +91,7 @@ export function storyLogoHtml(logoUrl: string): string {
  * right after <body>. Returns the page untouched when there is no logo.
  */
 export function injectStoryLogo(html: string, logoUrl: string | undefined): string {
-  if (!logoUrl) return html;
+  if (!logoUrl || !safeUrl(logoUrl)) return html;
   const withCss = html.includes("</head>") ? html.replace("</head>", () => `<style>${STORY_LOGO_CSS}</style>\n</head>`) : html;
   return withCss.replace(/<body[^>]*>/, (open) => `${open}\n${storyLogoHtml(logoUrl)}`);
 }
@@ -57,5 +101,7 @@ export const CHAPTER_IMAGE_CSS = `.chapter-img{display:block;width:100%;height:1
 
 /** Static-site markup of a chapter's scene image. */
 export function chapterImageHtml(imageUrl: string, className = "chapter-img"): string {
-  return `<img class="${className}" src="${escapeAttr(imageUrl)}" alt="" loading="lazy" decoding="async" />`;
+  const src = safeUrl(imageUrl);
+  if (!src) return "";
+  return `<img class="${escapeAttr(className)}" src="${escapeAttr(src)}" alt="" loading="lazy" decoding="async" />`;
 }

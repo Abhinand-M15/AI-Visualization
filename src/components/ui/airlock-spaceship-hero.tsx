@@ -78,8 +78,10 @@ export interface AirlockHeroProps {
 // Served through jsDelivr rather than raw.githubusercontent.com: raw hands the
 // file back as application/octet-stream with nosniff, which browsers may refuse
 // to treat as video. jsDelivr sends video/mp4 and honours range requests, which
-// is what makes seeking work at all.
-const CDN = "https://cdn.jsdelivr.net/gh/yuraoak/airlock-hero-assets@main"
+// is what makes seeking work at all. Pinned to a commit (UI-27), the same one
+// the published Airlock page uses (staticSite.ts), so preview and live match
+// and an upstream change can't alter or blank the hero.
+const CDN = "https://cdn.jsdelivr.net/gh/yura-build/airlock-hero-assets@c3a711953c185f314802a8e016527abf98f82f5e"
 const DEFAULT_VIDEO = `${CDN}/iss-hero-1080p.mp4`
 const DEFAULT_POSTER = `${CDN}/iss-hero-poster.jpg`
 const SANS = "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif"

@@ -2,6 +2,10 @@
 
 import { useEffect, useRef } from "react";
 
+/** One audio tap per <audio> element for the page's lifetime (cached outside the element, not on it). */
+type ReactiveTap = { source: MediaElementAudioSourceNode; ctx: AudioContext };
+const REACTIVE_TAPS = new WeakMap<HTMLAudioElement, ReactiveTap>();
+
 const INTRINSIC_SIZE = 640;
 /** Mouth region on avatar-1's static PNGs (neutral/happy/confused/idea/solution —
  *  all rendered from the same fixed camera framing, only the screen graphic
@@ -76,20 +80,19 @@ export function ReactiveMouthOverlay({
       // created for it (a second attempt throws) — scrolling back to a section
       // remounts this component against the same element, so the node (and its
       // permanent connection into the element's own output) is cached on the
-      // element itself and reused rather than recreated.
-      type ReactiveTap = { source: MediaElementAudioSourceNode; ctx: AudioContext };
-      const tapped = audioEl as HTMLAudioElement & { __reactiveTap?: ReactiveTap };
+      // element's entry in REACTIVE_TAPS and reused rather than recreated.
       let source: MediaElementAudioSourceNode;
       // The context is created only when the element has none yet: creating one
       // per mount leaked contexts (browsers allow only a handful) on every remount.
       let audioCtx: AudioContext;
-      if (tapped.__reactiveTap) {
-        source = tapped.__reactiveTap.source;
-        audioCtx = tapped.__reactiveTap.ctx;
+      const existing = REACTIVE_TAPS.get(audioEl);
+      if (existing) {
+        source = existing.source;
+        audioCtx = existing.ctx;
       } else {
         audioCtx = new AudioContextCtor();
         source = audioCtx.createMediaElementSource(audioEl);
-        tapped.__reactiveTap = { source, ctx: audioCtx };
+        REACTIVE_TAPS.set(audioEl, { source, ctx: audioCtx });
       }
       analyser = audioCtx.createAnalyser();
       analyser.fftSize = 256;

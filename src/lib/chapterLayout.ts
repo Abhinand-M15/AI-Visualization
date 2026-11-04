@@ -7,6 +7,19 @@ import { voyageBullets, voyagePullQuote } from "@/lib/voyage";
  * pill button and two small uppercase-labelled lists. Normal vertical scroll
  * only.
  *
+ * Zigzag (owner's request, 04 Nov 2026): on desktop (>= 900px) the side
+ * alternates per chapter. Chapter 1 has its text on the left and pictures on
+ * the right, chapter 2 the other way round, and so on (chapterLayoutClass).
+ * Below 900px every chapter stacks the same way: pictures, then text. A chapter
+ * with no picture (no scene image, no avatar) still gets a visual side: a large
+ * pull-quote card built from its own text (chapterQuoteCard), so the zigzag
+ * never breaks into a one-column chapter.
+ *
+ * Narration words are readable by default. They dim (and light up word by word)
+ * only while that chapter's own <audio> is actually playing (`cl-live`, set by
+ * initChapterLayout), so a visitor who continues without sound, pauses, or
+ * opens a chapter with no audio always sees full-colour text.
+ *
  * One source for both render paths. The React previews use ChapterLayout.tsx
  * and the static published pages use chapterLayoutHtml(); both take the same
  * CSS (CHAPTER_LAYOUT_CSS) and run the same behaviour (initChapterLayout), so
@@ -33,7 +46,15 @@ export interface ChapterTheme {
   rule: string;
   /** Picture drop shadow. */
   shadow?: string;
+  /** Not-yet-spoken narration words while that chapter's audio is playing. */
+  wordDim?: string;
 }
+
+/**
+ * One font stack for the non-Showcase, non-Voyage templates, used by the React
+ * preview roots and the static page bodies alike so line breaks match.
+ */
+export const TEMPLATE_SANS = "-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif";
 
 /** Most pictures one chapter shows: scene image, then the avatar. */
 export const CHAPTER_MEDIA_MAX = 3;
@@ -51,6 +72,7 @@ export const CHAPTER_THEMES = {
     pillText: "#ffffff",
     rule: "#e5e5e5",
     shadow: "0 24px 60px rgba(0,0,0,.14)",
+    wordDim: "#d4d4d4",
   },
   space: {
     text: "#f2f4f8",
@@ -63,6 +85,7 @@ export const CHAPTER_THEMES = {
     pillText: "#0a0a0a",
     rule: "rgba(255,255,255,.15)",
     shadow: "0 24px 60px rgba(0,0,0,.5)",
+    wordDim: "rgba(255,255,255,.25)",
   },
   lunar: {
     text: "#f2f4f8",
@@ -75,6 +98,7 @@ export const CHAPTER_THEMES = {
     pillText: "#0a0a0a",
     rule: "rgba(103,232,249,.2)",
     shadow: "0 24px 60px rgba(0,0,0,.5)",
+    wordDim: "rgba(255,255,255,.25)",
   },
   airlock: {
     text: "#f2f4f8",
@@ -87,6 +111,7 @@ export const CHAPTER_THEMES = {
     pillText: "#0a0a0a",
     rule: "rgba(255,255,255,.15)",
     shadow: "0 24px 60px rgba(0,0,0,.5)",
+    wordDim: "rgba(255,255,255,.25)",
   },
   /** Accent/glass follow each chapter's Voyage palette through the page's own custom properties. */
   voyage: {
@@ -114,6 +139,7 @@ const THEME_VARS: [keyof ChapterTheme, string][] = [
   ["pillText", "--cl-pill-text"],
   ["rule", "--cl-rule"],
   ["shadow", "--cl-shadow"],
+  ["wordDim", "--cl-word-dim"],
 ];
 
 /** The theme as CSS custom properties, for React `style`. */
@@ -165,6 +191,40 @@ export function chapterLists(
   return { keyPoints, upNext };
 }
 
+/**
+ * Which side the text sits on for chapter `index` (0-based) on desktop: the
+ * first chapter has its text on the left, the second on the right, and so on.
+ */
+export function chapterTextSide(index: number): "left" | "right" {
+  return index % 2 === 0 ? "left" : "right";
+}
+
+/**
+ * Class list of a chapter's `.cl` root, shared by ChapterLayout.tsx and
+ * chapterLayoutHtml() so the two paths cannot drift.
+ */
+export function chapterLayoutClass(index: number): string {
+  return `cl cl-text-${chapterTextSide(index)}`;
+}
+
+/**
+ * The visual for a chapter without pictures: its pull-quote (the first "Key
+ * points" item, the same sentence the Voyage key-point card leads with) in a
+ * large card, labelled with the chapter eyebrow. That sentence then leaves the
+ * panel's list so it is not shown twice. A chapter with no text falls back to
+ * its title. Shared by both render paths.
+ */
+export function chapterQuoteCard(
+  lists: ChapterLists,
+  eyebrow: string,
+  title: string,
+): { quote: string; label: string; panelLists: ChapterLists } {
+  const [first, ...rest] = lists.keyPoints;
+  return first
+    ? { quote: first, label: eyebrow, panelLists: { keyPoints: rest, upNext: lists.upNext } }
+    : { quote: title, label: eyebrow, panelLists: lists };
+}
+
 /** Pill label: advance to the next chapter, or return to the top after the last. */
 export function chapterNextLabel(index: number, total: number): string {
   return index + 1 < total ? "Next chapter" : "Back to top";
@@ -172,10 +232,24 @@ export function chapterNextLabel(index: number, total: number): string {
 
 export const CHAPTER_LAYOUT_CSS = `
 .cl{display:grid;grid-template-columns:minmax(0,1fr);gap:clamp(24px,4vw,64px);width:100%;max-width:1320px;margin:0 auto;color:var(--cl-text,#171717);scroll-margin-top:32px;box-sizing:border-box;}
-@media(min-width:900px){.cl{grid-template-columns:minmax(0,1.4fr) minmax(0,1fr);align-items:start;}}
+/* Zigzag: the text side alternates per chapter on desktop (see chapterLayoutClass). Small screens stack pictures, then text, for every chapter. */
+@media(min-width:900px){
+.cl{grid-template-columns:minmax(0,1.4fr) minmax(0,1fr);align-items:start;}
+.cl>.cl-media{grid-column:1;grid-row:1;}
+.cl>.cl-panel{grid-column:2;grid-row:1;}
+.cl.cl-text-left{grid-template-columns:minmax(0,1fr) minmax(0,1.4fr);}
+.cl.cl-text-left>.cl-panel{grid-column:1;}
+.cl.cl-text-left>.cl-media{grid-column:2;}
+}
 .cl-media{display:flex;flex-direction:column;gap:clamp(16px,2.5vw,32px);min-width:0;}
 .cl-fig{position:relative;margin:0;width:100%;aspect-ratio:16/9;border-radius:24px;overflow:hidden;background:var(--cl-media-bg,rgba(127,127,127,.12));box-shadow:var(--cl-shadow,0 24px 60px rgba(0,0,0,.25));transform-origin:50% 100%;}
 .cl-fig>img{display:block;width:100%;height:100%;object-fit:cover;}
+/* Visual side of a chapter without pictures: a pull-quote card in the template's panel colours. */
+.cl-fig.cl-fig-quote{aspect-ratio:auto;min-height:clamp(260px,30vw,460px);display:flex;align-items:center;padding:clamp(28px,4vw,64px);box-sizing:border-box;background:var(--cl-panel-bg,rgba(127,127,127,.08));border:1px solid var(--cl-panel-border,rgba(127,127,127,.25));}
+.cl-quote{margin:0;display:flex;flex-direction:column;gap:18px;min-width:0;}
+.cl-quote::before{content:"\\201C";display:block;height:.5em;font-family:Georgia,'Times New Roman',serif;font-size:96px;line-height:1;color:var(--cl-accent,currentColor);}
+.cl-quote p{margin:0;font-size:clamp(1.125rem,1.9vw,1.75rem);font-weight:600;line-height:1.3;letter-spacing:-.01em;color:var(--cl-text,#171717);overflow-wrap:break-word;}
+.cl-quote footer{font-size:.75rem;font-weight:500;text-transform:uppercase;letter-spacing:.12em;color:var(--cl-muted,#737373);}
 .cl-fig-avatar>.avatar-box,.cl-fig-avatar>.cl-fill{position:absolute;inset:0;width:100%;height:100%;box-sizing:border-box;padding:3%;}
 .cl-fill>*{width:100%;height:100%;object-fit:contain;}
 .cl-panel{min-width:0;display:flex;flex-direction:column;gap:20px;padding:clamp(22px,2.6vw,36px);border-radius:24px;border:1px solid var(--cl-panel-border,rgba(127,127,127,.25));background:var(--cl-panel-bg,transparent);box-sizing:border-box;}
@@ -188,8 +262,12 @@ export const CHAPTER_LAYOUT_CSS = `
 .cl-pill:focus-visible{outline:2px solid var(--cl-accent,currentColor);outline-offset:3px;}
 .cl-lists{display:grid;grid-template-columns:minmax(0,1fr);gap:20px;padding-top:20px;border-top:1px solid var(--cl-rule,rgba(127,127,127,.25));}
 @media(min-width:1180px){.cl-lists{grid-template-columns:minmax(0,1.5fr) minmax(0,1fr);gap:28px;}}
-.cl-list h3{margin:0 0 10px;font-size:.6875rem;font-weight:600;text-transform:uppercase;letter-spacing:.12em;color:var(--cl-accent,#737373);}
+.cl-list h3{margin:0 0 10px;font-size:.75rem;font-weight:600;text-transform:uppercase;letter-spacing:.12em;color:var(--cl-accent,#737373);}
 .cl-list ul{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:8px;font-size:.9375rem;line-height:1.45;color:var(--cl-muted,#737373);}
+/* Narration words: full colour unless this chapter's audio is playing (cl-live). */
+.cl .word{color:var(--cl-text,inherit);transition:color .15s;}
+.cl.cl-live .word{color:var(--cl-word-dim,rgba(127,127,127,.55));}
+.cl.cl-live .word.spoken{color:var(--cl-text,inherit);}
 /* Entrance: only when the script is running, so no-JS pages stay readable. */
 .cl-js .cl-fig,.cl-js .cl-panel{opacity:0;transition:opacity .9s ease,transform 1.1s cubic-bezier(.2,.7,.2,1),filter .9s ease;}
 /* Compositor layers only while a block is about to enter or is entering (cl-near, dropped once settled), not for the whole page. */
@@ -203,7 +281,7 @@ export const CHAPTER_LAYOUT_CSS = `
 @media(min-width:900px){.cl-js .cl-panel.in{position:sticky;}}
 @media(prefers-reduced-motion:reduce){
 .cl-js .cl-fig,.cl-js .cl-panel,.cl-js .cl-fig>img,.cl-js .cl-fig>.avatar-box,.cl-js .cl-fig>.cl-fill{opacity:1;transform:none;filter:none;transition:none;will-change:auto;}
-.cl-pill{transition:none;}
+.cl-pill,.cl .word{transition:none;}
 }
 `;
 
@@ -238,6 +316,26 @@ export function initChapterLayout(root: ParentNode | Element): () => void {
 
   layouts.forEach(function (layout) {
     layout.classList.add("cl-js");
+    // Dim the not-yet-spoken words only while this chapter's own narration is
+    // audible. Media events do not bubble, hence capture. A muted play() is the
+    // iOS unlock primer on the static pages, not real narration, so it is ignored.
+    const onPlay = function (e: Event) {
+      const media = e.target as HTMLMediaElement | null;
+      if (media && media.tagName === "AUDIO" && !media.muted) layout.classList.add("cl-live");
+    };
+    const onStop = function (e: Event) {
+      const media = e.target as HTMLMediaElement | null;
+      if (media && media.tagName === "AUDIO") layout.classList.remove("cl-live");
+    };
+    layout.addEventListener("play", onPlay, true);
+    layout.addEventListener("pause", onStop, true);
+    layout.addEventListener("ended", onStop, true);
+    cleanups.push(function () {
+      layout.removeEventListener("play", onPlay, true);
+      layout.removeEventListener("pause", onStop, true);
+      layout.removeEventListener("ended", onStop, true);
+      layout.classList.remove("cl-live");
+    });
     const targets: Element[] = Array.prototype.slice
       .call(layout.querySelectorAll(".cl-fig, .cl-panel"))
       .filter(function (el: Element) {
@@ -356,7 +454,7 @@ export interface ChapterLayoutHtmlInput {
 
 function listHtml(label: string, items: string[]): string {
   if (items.length === 0) return "";
-  return `<div class="cl-list"><h3>${label}</h3><ul>${items.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul></div>`;
+  return `<div class="cl-list"><h3>${escapeHtml(label)}</h3><ul>${items.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul></div>`;
 }
 
 function figureInner(item: ChapterMediaHtml): string {
@@ -367,23 +465,25 @@ function figureInner(item: ChapterMediaHtml): string {
 
 /** Static-site markup of one chapter, the twin of ChapterLayout.tsx. */
 export function chapterLayoutHtml(input: ChapterLayoutHtmlInput): string {
-  const media = input.media.slice(0, CHAPTER_MEDIA_MAX);
+  const media = input.media.filter((item) => item.html).slice(0, CHAPTER_MEDIA_MAX);
+  const card = media.length === 0 ? chapterQuoteCard(input.lists, input.eyebrow, input.title) : null;
+  const panelLists = card ? card.panelLists : input.lists;
   const lists =
-    listHtml("Key points", input.lists.keyPoints) +
-    listHtml("Up next", input.lists.upNext);
-  return `<div class="cl" style="${chapterThemeStyle(input.theme)}">
-  <div class="cl-media">${media
-    .map(
-      (item) =>
-        `<figure class="cl-fig cl-fig-${item.kind}">${figureInner(item)}</figure>`,
-    )
-    .join("")}</div>
+    listHtml("Key points", panelLists.keyPoints) +
+    listHtml("Up next", panelLists.upNext);
+  const visual = card
+    ? `<figure class="cl-fig cl-fig-quote"><blockquote class="cl-quote"><p>${escapeHtml(card.quote)}</p><footer>${escapeHtml(card.label)}</footer></blockquote></figure>`
+    : media
+        .map((item) => `<figure class="cl-fig cl-fig-${item.kind}">${figureInner(item)}</figure>`)
+        .join("");
+  return `<div class="${chapterLayoutClass(input.index)}" style="${escapeHtml(chapterThemeStyle(input.theme))}">
+  <div class="cl-media">${visual}</div>
   <aside class="cl-panel">
     <span class="cl-eyebrow">${escapeHtml(input.eyebrow)}</span>
     <h2>${escapeHtml(input.title)}</h2>
     ${input.textHtml}
     ${input.audioHtml ?? ""}
-    <button type="button" class="cl-pill"${input.nextLabel ? " data-cl-custom" : ""}>${input.nextLabel ?? chapterNextLabel(input.index, input.total)}</button>
+    <button type="button" class="cl-pill"${input.nextLabel ? " data-cl-custom" : ""}>${escapeHtml(input.nextLabel ?? chapterNextLabel(input.index, input.total))}</button>
     ${lists ? `<div class="cl-lists">${lists}</div>` : ""}
   </aside>
 </div>`;

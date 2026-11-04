@@ -2,6 +2,7 @@ import { GoogleGenAI, Type, type Schema } from "@google/genai";
 import type { CaseStudyPhase, Chunk, DocumentType, EmotionKey, EvidenceGrade, Storyline } from "@/lib/types";
 import { getSystemPrompt } from "@/lib/agent/systemPrompts";
 import { fillPrompt, getPrompt, type Domain } from "@/lib/domains";
+import { notConfigured, ProviderError, toProviderError } from "@/lib/server/errors";
 
 const MODEL_CASCADE = ["gemini-flash-latest", "gemini-flash-lite-latest"];
 const MAX_RETRIES_PER_MODEL = 2;
@@ -358,6 +359,11 @@ function renumber(title: string, chunks: Chunk[]): Storyline {
   };
 }
 
+/** Whole cascade budget: parse-and-generate has 300 s in total and also parses the document. */
+const GEMINI_CASCADE_BUDGET_MS = 250_000;
+/** Below this much time left, another attempt cannot finish; stop with the last error. */
+const MIN_ATTEMPT_MS = 20_000;
+
 async function callGemini(
   systemInstruction: string,
   userContent: string,
@@ -365,14 +371,15 @@ async function callGemini(
   apiKey?: string
 ): Promise<GeminiStorylineResponse> {
   const key = apiKey ?? process.env.GEMINI_API_KEY;
-  if (!key) {
-    throw new Error("GEMINI_API_KEY is not set. Add it to .env.local (see .env.local.example).");
-  }
+  if (!key) throw notConfigured("Story generation");
   const ai = new GoogleGenAI({ apiKey: key });
+  const deadline = Date.now() + GEMINI_CASCADE_BUDGET_MS;
 
   let lastError: unknown;
   for (const model of MODEL_CASCADE) {
     for (let attempt = 0; attempt < MAX_RETRIES_PER_MODEL; attempt++) {
+      const timeLeft = deadline - Date.now();
+      if (timeLeft < MIN_ATTEMPT_MS) break;
       try {
         const response = await ai.models.generateContent({
           model,
@@ -382,6 +389,7 @@ async function callGemini(
             responseMimeType: "application/json",
             responseSchema: schema,
             maxOutputTokens: 65536,
+            httpOptions: { timeout: timeLeft },
           },
         });
         const text = response.text;
@@ -389,16 +397,16 @@ async function callGemini(
         return JSON.parse(text) as GeminiStorylineResponse;
       } catch (error) {
         lastError = error;
+        // A rejected key, a bad request or an exhausted quota will not work on the next model either (AR-15, UX-06).
+        const classified = toProviderError(error, "gemini");
+        if (classified instanceof ProviderError && !classified.retryable) throw classified;
         const delayMs = 500 * 2 ** attempt;
         await new Promise((resolve) => setTimeout(resolve, delayMs));
       }
     }
   }
-  throw new Error(
-    `Story generation failed after trying all models: ${
-      lastError instanceof Error ? lastError.message : String(lastError)
-    }`
-  );
+  console.error("story generation failed after trying all models:", lastError);
+  throw toProviderError(lastError ?? new Error("timed out"), "gemini");
 }
 
 function targetChunkCountInstruction(targetChunkCount: number, isCaseStudy: boolean): string {

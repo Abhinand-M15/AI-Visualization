@@ -173,6 +173,7 @@ export function ASMRBackground({ className }: { className?: string }) {
           p.x *= sx;
           p.y *= sy;
         }
+        if (reduceMotion?.matches) drawStill();
       });
     };
 
@@ -198,6 +199,22 @@ export function ASMRBackground({ className }: { className?: string }) {
       }
     };
 
+    // Reduced motion (UI-08): one still frame of the field, no drift, trail or pointer swirl.
+    const drawStill = () => {
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.fillStyle = "#0A0A0C";
+      ctx.fillRect(0, 0, width, height);
+      for (let i = 0; i < particles.length; i++) particles[i].draw();
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+    };
+
+    const reduceMotion = typeof window.matchMedia === "function" ? window.matchMedia("(prefers-reduced-motion: reduce)") : null;
+    const applyMotionPreference = () => {
+      cancelAnimationFrame(animationFrameId);
+      if (reduceMotion?.matches) drawStill();
+      else render();
+    };
+
     const handleMouseMove = (e: MouseEvent) => {
       mouse.x = e.clientX;
       mouse.y = e.clientY;
@@ -218,9 +235,11 @@ export function ASMRBackground({ className }: { className?: string }) {
     window.addEventListener("touchmove", handleTouchMove, { passive: true });
 
     init();
-    render();
+    applyMotionPreference();
+    reduceMotion?.addEventListener("change", applyMotionPreference);
 
     return () => {
+      reduceMotion?.removeEventListener("change", applyMotionPreference);
       window.removeEventListener("resize", handleResize);
       cancelAnimationFrame(resizeFrame);
       window.removeEventListener("mousemove", handleMouseMove);
@@ -234,7 +253,7 @@ export function ASMRBackground({ className }: { className?: string }) {
       <canvas ref={canvasRef} className="absolute inset-0 block h-full w-full" />
       <div
         ref={cursorRef}
-        className="pointer-events-none fixed left-0 top-0 z-50 h-4 w-4 rounded-full border border-white/20 transition-transform duration-75 ease-out"
+        className="pointer-events-none fixed left-0 top-0 z-50 h-4 w-4 rounded-full border border-white/20 transition-transform duration-75 ease-out motion-reduce:hidden"
       />
     </div>
   );

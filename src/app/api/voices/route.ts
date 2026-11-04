@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
+import { apiErrorResponse } from "@/lib/server/errors";
 import { listVoices } from "@/lib/tts";
-import { requireUser, unauthorizedResponse } from "@/lib/auth/session";
+import { requireUser } from "@/lib/auth/session";
 
 export async function GET() {
   try {
@@ -8,12 +9,6 @@ export async function GET() {
     const voices = await listVoices();
     return NextResponse.json({ voices });
   } catch (error) {
-    const unauthorized = unauthorizedResponse(error);
-    if (unauthorized) return unauthorized;
-    console.error("list voices failed:", error);
-    return NextResponse.json(
-      { error: error instanceof Error ? error.message : "Unexpected error" },
-      { status: 500 }
-    );
+    return apiErrorResponse(error, "list voices");
   }
 }

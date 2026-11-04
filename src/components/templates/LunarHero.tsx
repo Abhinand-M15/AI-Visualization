@@ -17,13 +17,13 @@ export function LunarHero({ title, description }: { title: string; description: 
   const sizeVars = { "--lunar-title-m": size.mobile, "--lunar-title-d": size.desktop } as CSSProperties;
 
   return (
-    <div className="w-full min-h-screen bg-zinc-950 flex flex-col items-center justify-center p-4 sm:p-10 font-sans">
+    <div className="w-full min-h-screen bg-zinc-950 flex flex-col items-center justify-center p-4 sm:p-10">
       <div className="relative w-full max-w-[1000px]">
         <LunarGravityCard
           title={
             <span
               style={sizeVars}
-              className="block text-[length:var(--lunar-title-m)] md:text-[length:var(--lunar-title-d)]"
+              className="block text-[length:var(--lunar-title-m)] [overflow-wrap:break-word] [hyphens:auto] md:text-[length:var(--lunar-title-d)]"
             >
               {lead && (
                 <>

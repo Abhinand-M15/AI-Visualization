@@ -53,7 +53,7 @@ export function PasswordField({
           aria-label={visible ? `Hide ${label.toLowerCase()}` : `Show ${label.toLowerCase()}`}
           aria-pressed={visible}
           aria-controls={id}
-          className="absolute inset-y-1.5 right-1.5 rounded-lg px-3 text-sm font-medium text-neutral-500 hover:bg-neutral-100 hover:text-neutral-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-violet-400 dark:text-indigo-200/70 dark:hover:bg-white/10 dark:hover:text-white"
+          className="absolute inset-y-1.5 right-1.5 rounded-lg px-3 text-sm font-medium text-neutral-600 hover:bg-neutral-100 hover:text-neutral-900 dark:text-indigo-200/80 dark:hover:bg-white/10 dark:hover:text-white"
         >
           {visible ? "Hide" : "Show"}
         </button>
@@ -70,7 +70,7 @@ export function PasswordField({
               />
             ))}
           </div>
-          <p className="mt-1.5 text-xs text-neutral-500 dark:text-indigo-200/50">
+          <p className="mt-1.5 text-xs text-muted-foreground">
             {value ? (
               <>
                 Strength: <span className="font-medium">{STRENGTH_LABELS[strength]}</span>.{" "}

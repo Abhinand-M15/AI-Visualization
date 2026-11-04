@@ -16,7 +16,7 @@ import {
   chapterLayoutHtml,
   chapterLists,
 } from "@/lib/chapterLayout";
-import { chapterImageHtml } from "@/components/templates/storyMedia";
+import { chapterImageHtml, escapeHtml, safeUrl, storagePublicUrl } from "@/components/templates/storyMedia";
 import { NARRATION_DOCK_CSS, NARRATION_DOCK_JS, narrationDockMarkup } from "@/lib/narrationDock";
 import { VOYAGE_MUSIC_JS } from "@/lib/voyageMusic";
 
@@ -41,10 +41,6 @@ export interface VoyageSiteOptions {
   customMusic?: Partial<Record<VoyageMood, string>>;
 }
 
-function escapeHtml(input: string): string {
-  return input.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
-}
-
 /** JSON for an inline <script type="application/json"> — `<` is escaped so the
  *  data can never close the tag or open a comment. */
 function inlineJson(value: unknown): string {
@@ -56,7 +52,7 @@ const bundlePath = (path: string) => path.replace(/^\//, "");
 
 function chunkAudioUrl(supabaseUrl: string, projectId: string, chunk: Chunk): string | null {
   if (!chunk.audioUrl) return null;
-  return `${supabaseUrl}/storage/v1/object/public/chunk-audio/${projectId}/${chunk.id}.mp3`;
+  return storagePublicUrl(supabaseUrl, "chunk-audio", projectId, `${chunk.id}.mp3`);
 }
 
 /** The avatar slot for one chunk: its video (webm + mp4 fallback) when it has
@@ -65,15 +61,21 @@ function avatarMarkup(chunk: Chunk, index: number, avatars: Avatar[]): string {
   if (avatars.length === 0) return "";
   const avatar = avatars[index % avatars.length];
   const videos = avatar.videoUrls ?? [];
+  // Every URL is allow-listed (safeUrl) and attribute-escaped; a refused URL drops the element.
+  const attr = (path: string) => escapeHtml(safeUrl(bundlePath(path)));
   if (videos.length > 0) {
     const url = videos[index % videos.length];
-    const fallback = avatarVideoFallbackUrl(url);
+    const src = attr(url);
+    if (!src) return "";
+    const fallbackPath = avatarVideoFallbackUrl(url);
+    const fallback = fallbackPath ? attr(fallbackPath) : "";
     if (fallback) {
-      return `<video muted loop playsinline preload="metadata"><source src="${bundlePath(url)}" type="video/webm" /><source src="${bundlePath(fallback)}" type="video/mp4" /></video>`;
+      return `<video muted loop playsinline preload="metadata"><source src="${src}" type="video/webm" /><source src="${fallback}" type="video/mp4" /></video>`;
     }
-    return `<video src="${bundlePath(url)}" muted loop playsinline preload="metadata"></video>`;
+    return `<video src="${src}" muted loop playsinline preload="metadata"></video>`;
   }
-  return `<img src="${bundlePath(getAvatarImage(avatar, chunk.emotion))}" alt="" decoding="async" />`;
+  const img = attr(getAvatarImage(avatar, chunk.emotion));
+  return img ? `<img src="${img}" alt="" decoding="async" />` : "";
 }
 
 const GATE_CSS = `
@@ -84,7 +86,9 @@ body{margin:0;background:#05030c;}
 #narration-gate .gate-card p{margin:0;font-size:.9375rem;line-height:1.5;color:rgba(255,255,255,.78);}
 #narration-gate button{font:inherit;cursor:pointer;}
 #narration-start{border:0;border-radius:999px;padding:12px 28px;font-size:1rem;font-weight:600;background:#83efff;color:#04121a;}
-#narration-skip{border:0;background:none;padding:4px;font-size:.8125rem;color:rgba(255,255,255,.6);text-decoration:underline;}
+#narration-skip{border:0;background:none;padding:4px;font-size:.8125rem;color:rgba(255,255,255,.72);text-decoration:underline;}
+#narration-start:focus-visible,#narration-skip:focus-visible{outline:2px solid #fff;outline-offset:3px;}
+@media(prefers-reduced-motion:reduce){#narration-gate{transition:none;}}
 #vg-music-toggle{display:none;}
 #vg-music-toggle.visible{display:inline-flex;}
 `;
@@ -129,6 +133,20 @@ ScrollTrigger.config({ ignoreMobileResize: true });
   var SWIPE_MIN = 50;
 
   function pad2(n) { return (n < 10 ? '0' : '') + n; }
+  function showGate() {
+    if (!gate) return;
+    gate.classList.remove('hidden');
+    gate.removeAttribute('inert');
+    gate.removeAttribute('aria-hidden');
+    var start = document.getElementById('narration-start');
+    if (start) { try { start.focus({ preventScroll: true }); } catch (e) { start.focus(); } }
+  }
+  function hideGate() {
+    if (!gate) return;
+    gate.classList.add('hidden');
+    gate.setAttribute('inert', '');
+    gate.setAttribute('aria-hidden', 'true');
+  }
   function esc(s) {
     return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
   }
@@ -347,7 +365,7 @@ ScrollTrigger.config({ ignoreMobileResize: true });
     if (!narrationEnabled || narrationPaused) return;
     audio.play().catch(function (err) {
       // Still blocked — ask for the gesture again rather than failing silently.
-      if (err && err.name === 'NotAllowedError' && gate) { narrationEnabled = false; gate.classList.remove('hidden'); }
+      if (err && err.name === 'NotAllowedError' && gate) { narrationEnabled = false; syncToggles(); showGate(); }
     });
   }
 
@@ -371,12 +389,20 @@ ScrollTrigger.config({ ignoreMobileResize: true });
     if (video) video.pause();
   }
 
-  audio.addEventListener('play', function () { music.duck(true); });
-  audio.addEventListener('pause', function () { music.duck(false); });
+  // The narration <audio> sits outside the chapter layout here, so the layout's
+  // own listener (initChapterLayout) cannot see it: mark the layout live while
+  // it plays, which is when the not-yet-spoken words dim (voyageCss.ts).
+  function setLive(on) {
+    var layout = q('.cl', viewHost);
+    if (layout) layout.classList.toggle('cl-live', on);
+  }
+  audio.addEventListener('play', function () { music.duck(true); if (!audio.muted) setLive(true); });
+  audio.addEventListener('pause', function () { music.duck(false); setLive(false); });
   // Auto-scroll: when the narration ends, open the next chapter. Nothing happens
   // after the last one, when the switch is off, or while narration is paused.
   audio.addEventListener('ended', function () {
     music.duck(false);
+    setLive(false);
     if (view !== 'chunk' || active + 1 >= total) return;
     if (ndAutoOn && narrationEnabled && !narrationPaused) go('chunk', active + 1);
   });
@@ -582,17 +608,31 @@ ScrollTrigger.config({ ignoreMobileResize: true });
       var p = audio.play();
       prime = (p && p.then ? p : Promise.resolve()).then(function () { audio.pause(); audio.currentTime = 0; }).catch(function () {}).then(function () { audio.muted = false; });
     }
-    if (gate) gate.classList.add('hidden');
+    hideGate();
     showToggles();
     prime.then(function () { if (view === 'chunk') startChunkNarration(); });
   }
 
+  // "Continue without sound": nothing plays, so the words stay at full colour.
+  function continueWithoutSound() {
+    hideGate();
+    narrationPaused = true;
+    audio.pause();
+    showToggles();
+  }
   if (gate) {
-    q('#narration-start').addEventListener('click', enableSound);
-    q('#narration-skip').addEventListener('click', function () {
-      gate.classList.add('hidden');
-      narrationPaused = true;
-      showToggles();
+    var gateStart = q('#narration-start');
+    var gateSkip = q('#narration-skip');
+    gateStart.addEventListener('click', enableSound);
+    gateSkip.addEventListener('click', continueWithoutSound);
+    // Modal: Tab stays on the two buttons, Esc continues without sound.
+    gate.addEventListener('keydown', function (e) {
+      if (gate.classList.contains('hidden')) return;
+      if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); continueWithoutSound(); return; }
+      if (e.key !== 'Tab') return;
+      if (e.shiftKey && document.activeElement === gateStart) { e.preventDefault(); gateSkip.focus(); }
+      else if (!e.shiftKey && document.activeElement === gateSkip) { e.preventDefault(); gateStart.focus(); }
+      else if (document.activeElement !== gateStart && document.activeElement !== gateSkip) { e.preventDefault(); gateStart.focus(); }
     });
   }
   if (narrationToggle) {
@@ -613,6 +653,7 @@ ScrollTrigger.config({ ignoreMobileResize: true });
   document.addEventListener('visibilitychange', function () { if (document.hidden) audio.pause(); });
 
   // ------------------------------------------------------------ boot
+  if (gate) showGate();
   if (total > 0) {
     var start = parseHash();
     view = start.view;
@@ -643,7 +684,7 @@ export function renderVoyage(
       full: dest.fullTitle,
       dur: dest.duration,
       mood: dest.mood,
-      audio: chunkAudioUrl(supabaseUrl, project.id, chunk),
+      audio: safeUrl(chunkAudioUrl(supabaseUrl, project.id, chunk)) || null,
       layout: chapterLayoutHtml({
         theme: CHAPTER_THEMES.voyage,
         index,
@@ -703,9 +744,9 @@ export function renderVoyage(
     </div>
   </nav>
   <audio id="vg-audio" preload="none"></audio>
-  <div id="narration-gate" role="dialog" aria-label="Start sound">
+  <div id="narration-gate" role="dialog" aria-modal="true" aria-label="Start sound" aria-describedby="narration-gate-text">
     <div class="gate-card">
-      <p>${escapeHtml(gateCopy)}</p>
+      <p id="narration-gate-text">${escapeHtml(gateCopy)}</p>
       <button type="button" id="narration-start">Tap to start</button>
       <button type="button" id="narration-skip">Continue without sound</button>
     </div>

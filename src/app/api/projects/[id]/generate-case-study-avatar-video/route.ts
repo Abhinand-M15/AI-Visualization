@@ -1,12 +1,15 @@
 import { getSupabase } from "@/lib/db";
 import { generateLipsyncVideo } from "@/lib/wav2lip";
 import { buildPayload, PROJECT_SELECT_COLUMNS, rowToProject, updatedByFields, type ProjectRow } from "@/lib/projects";
-import { requireUser, unauthorizedResponse, type AppUser } from "@/lib/auth/session";
+import { requireUser, type AppUser } from "@/lib/auth/session";
 import { logActivity } from "@/lib/activity";
 import { flattenCaseStudySections } from "@/lib/caseStudySections";
 import { AVATARS } from "@/lib/avatars";
 import { mapWithConcurrency, withRetry } from "@/lib/concurrency";
 import { createNdjsonStream } from "@/lib/ndjsonStream";
+import { apiErrorResponse, errorBody, HttpError } from "@/lib/server/errors";
+import { caseStudyStorageId, chunkAudioPath, chunkVideoPath, isValidProjectId } from "@/lib/server/ids";
+import { updateLatestProject } from "@/lib/server/projectWrites";
 
 const AUDIO_BUCKET = "chunk-audio";
 const VIDEO_BUCKET = "chunk-video";
@@ -23,13 +26,21 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
   try {
     user = await requireUser();
   } catch (error) {
-    const unauthorized = unauthorizedResponse(error);
-    if (unauthorized) return unauthorized;
-    throw error;
+    return apiErrorResponse(error, "generate-case-study-avatar-video");
   }
   const { id } = await context.params;
+  if (!isValidProjectId(id)) return Response.json({ error: "Project not found.", code: "not_found" }, { status: 404 });
 
   return createNdjsonStream(async (send) => {
+    try {
+      await run(send);
+    } catch (error) {
+      const { body: errorJson } = errorBody(error, "generate-case-study-avatar-video");
+      send({ type: "error", message: errorJson.error, code: errorJson.code });
+    }
+  });
+
+  async function run(send: (obj: unknown) => void) {
     const supabase = getSupabase();
     let fetchQuery = supabase.from("projects").select(PROJECT_SELECT_COLUMNS).eq("id", id);
     if (user) fetchQuery = fetchQuery.eq("owner_id", user.id);
@@ -40,16 +51,16 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
 
     const project = rowToProject(existing as unknown as ProjectRow);
     if (!project.caseStudyBinding?.slots) {
-      throw new Error("Generate the case study layout before generating avatar video.");
+      throw new HttpError(400, "bad_request", "Generate the case study layout before generating avatar video.");
     }
     if (!project.caseStudyBinding.sectionAudio || Object.keys(project.caseStudyBinding.sectionAudio).length === 0) {
-      throw new Error("Generate narration audio before generating avatar video — this step lip-syncs that audio.");
+      throw new HttpError(400, "bad_request", "Generate narration audio before generating avatar video — this step lip-syncs that audio.");
     }
 
     const avatar1 = AVATARS.find((avatar) => avatar.id === "avatar-1");
     const sourceVideoPath = avatar1?.videoUrls?.[0];
     if (!sourceVideoPath) {
-      throw new Error("Avatar 1 has no source video configured for lipsync.");
+      throw new HttpError(503, "not_configured", "Avatar video is not set up on this server.");
     }
     const appBaseUrl = process.env.APP_BASE_URL ?? DEFAULT_APP_BASE_URL;
     const sourceVideoUrl = `${appBaseUrl}${sourceVideoPath}`;
@@ -74,7 +85,8 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
         }
         try {
           return await withRetry(async () => {
-            const audioPath = `${id}/case-study-${section.key}.mp3`;
+            const storageId = caseStudyStorageId(section.key);
+            const audioPath = chunkAudioPath(id, storageId);
             const { data: audioBlob, error: downloadError } = await supabase.storage
               .from(AUDIO_BUCKET)
               .download(audioPath);
@@ -85,8 +97,7 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
 
             const videoBuffer = await generateLipsyncVideo(sourceVideoUrl, audioBuffer);
 
-            const storageId = `case-study-${section.key}`;
-            const videoPath = `${id}/${storageId}.mp4`;
+            const videoPath = chunkVideoPath(id, storageId);
             const { error: uploadError } = await supabase.storage
               .from(VIDEO_BUCKET)
               .upload(videoPath, videoBuffer, { contentType: "video/mp4", upsert: true });
@@ -96,38 +107,31 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
             return { key: section.key, url: `/api/projects/${id}/video/${storageId}` };
           });
         } catch (error) {
-          failures.push({ key: section.key, message: error instanceof Error ? error.message : String(error) });
+          console.error(`avatar video: section ${section.key} failed:`, error);
+          failures.push({ key: section.key, message: "The lip-sync video could not be made for this section." });
           return null;
         }
       },
       (completed, total) => send({ type: "progress", completed, total })
     );
 
-    const sectionVideo: Record<string, string> = { ...project.caseStudyBinding.sectionVideo };
-    for (const result of results) {
-      if (result) sectionVideo[result.key] = result.url;
-    }
+    // Merged into the latest stored layout, so edits saved while this ran are kept (UX-02).
+    const made = results.filter((result): result is { key: string; url: string } => Boolean(result));
+    const updated = await updateLatestProject(id, user?.id ?? null, (latest) => {
+      if (!latest.caseStudyBinding?.slots || made.length === 0) return null;
+      const sectionVideo: Record<string, string> = { ...latest.caseStudyBinding.sectionVideo };
+      for (const result of made) sectionVideo[result.key] = result.url;
+      return {
+        payload: buildPayload(latest, { chunks: latest.chunks, caseStudyBinding: { ...latest.caseStudyBinding, sectionVideo } }),
+        columns: updatedByFields(user),
+      };
+    });
 
-    let updateQuery = supabase
-      .from("projects")
-      .update({
-        payload: buildPayload(project, {
-          chunks: project.chunks,
-          caseStudyBinding: { ...project.caseStudyBinding, sectionVideo },
-        }),
-        updated_at: new Date().toISOString(),
-        ...updatedByFields(user),
-      })
-      .eq("id", id);
-    if (user) updateQuery = updateQuery.eq("owner_id", user.id);
-    const { data: updated, error: updateError } = await updateQuery.select(PROJECT_SELECT_COLUMNS).single();
-
-    if (updateError) throw new Error(updateError.message);
     await logActivity(user, id, "video.generated", { requested: sections.length, failed: failures.length });
     send({
       type: "done",
-      project: rowToProject(updated as unknown as ProjectRow),
+      project: rowToProject(updated),
       failures: failures.length > 0 ? failures : undefined,
     });
-  });
+  }
 }

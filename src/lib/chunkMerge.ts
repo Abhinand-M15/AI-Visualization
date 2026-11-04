@@ -1,5 +1,6 @@
 import type { Chunk } from "@/lib/types";
-/** Story fields a client may set on a chunk; audio fields are server-owned. */
+import { isValidChunkId } from "@/lib/server/ids";
+/** Story fields a client may set on a chunk; audio and image fields are server-owned. */
 const CLIENT_CHUNK_FIELDS = ["emotion", "phase", "impactScore", "evidenceGrade"] as const;
 
 /**
@@ -7,6 +8,10 @@ const CLIENT_CHUNK_FIELDS = ["emotion", "phase", "impactScore", "evidenceGrade"]
  * the stored chunk while its narration text is unchanged, and dropped (and
  * flagged outdated) once it changes, so a save never keeps narration that no
  * longer matches the text, and never loses narration that still does.
+ *
+ * `submitted` should come from validateClientChunks() (src/lib/server/chunks.ts);
+ * ids are checked here again because they end up in Storage paths and in the
+ * published HTML: anything but CHUNK_ID_PATTERN gets a fresh server id.
  */
 export function mergeChunks(submitted: unknown[], previousChunks: Chunk[]) {
   const previousById = new Map(previousChunks.map((chunk) => [chunk.id, chunk]));
@@ -18,7 +23,7 @@ export function mergeChunks(submitted: unknown[], previousChunks: Chunk[]) {
     const raw = entry as Record<string, unknown>;
     // Unknown or duplicate ids (e.g. a new chapter, or an AI revision reusing a
     // deleted chapter's id) get a fresh one.
-    const rawId = typeof raw.id === "string" && raw.id.trim() ? raw.id : "";
+    const rawId = isValidChunkId(raw.id) ? raw.id : "";
     const id = rawId && !seen.has(rawId) ? rawId : crypto.randomUUID();
     seen.add(id);
     const previous = previousById.get(id);

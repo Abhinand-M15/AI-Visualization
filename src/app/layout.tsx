@@ -4,6 +4,7 @@ import "./globals.css";
 import { ThemeProvider } from "@/components/ThemeProvider";
 import { ThemeToggle } from "@/components/ThemeToggle";
 import { UserMenu } from "@/components/UserMenu";
+import { AppChrome } from "@/components/AppChrome";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -16,11 +17,13 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Story Site Generator",
-  description: "Turn a document into a narrated, chunked story website.",
+  title: { default: "Story Site Generator", template: "%s · Story Site Generator" },
+  description: "Turn a document into a narrated story website.",
 };
 
-const THEME_INIT_SCRIPT = `(function(){try{var t=localStorage.getItem('theme');if(t==='light'){document.documentElement.classList.remove('dark');}else{document.documentElement.classList.add('dark');}}catch(e){document.documentElement.classList.add('dark');}})();`;
+// Runs before paint so the theme is correct on first render, no flash.
+// Dark unless the user picked light (the app's original default).
+const THEME_INIT_SCRIPT = `(function(){var d=document.documentElement;try{d.classList.toggle('dark',localStorage.getItem('theme')!=='light');}catch(e){d.classList.add('dark');}})();`;
 
 export default function RootLayout({ children }: LayoutProps<"/">) {
   return (
@@ -30,13 +33,14 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
       suppressHydrationWarning
     >
       <head>
-        {/* Runs before paint so the theme is correct on first render, no flash. */}
         <script dangerouslySetInnerHTML={{ __html: THEME_INIT_SCRIPT }} />
       </head>
       <body className="min-h-full flex flex-col">
         <ThemeProvider>
-          <ThemeToggle />
-          <UserMenu />
+          <AppChrome>
+            <UserMenu />
+            <ThemeToggle />
+          </AppChrome>
           {children}
         </ThemeProvider>
       </body>

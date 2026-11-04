@@ -1,7 +1,4 @@
-"use client";
-
 import type { CSSProperties } from "react";
-import { useTheme } from "@/components/ThemeProvider";
 import {
   ASTEROIDS,
   LIGHT_METEORS,
@@ -71,13 +68,16 @@ function Asteroids({
  * slow-tumbling asteroids) fills the whole screen regardless of how narrow
  * the content column above it is. Meteors/asteroids are deliberately kept
  * low-opacity and slow so they read as ambient texture, not a distraction.
+ *
+ * Both variants are rendered and the `.dark` class (set before paint) picks
+ * one, so a light-mode user never sees the dark nebula flash on load (UI-07).
+ * The hidden variant is display:none, so its animations don't run. Motion
+ * stops under prefers-reduced-motion (globals.css).
  */
 export function SpaceBackdrop() {
-  const { theme } = useTheme();
-
-  if (theme === "light") {
-    return (
-      <div className="fixed inset-0 -z-10 overflow-hidden" style={LIGHT_NEBULA_LAYER}>
+  return (
+    <div aria-hidden="true">
+      <div className="fixed inset-0 -z-10 overflow-hidden dark:hidden" style={LIGHT_NEBULA_LAYER}>
         <div
           className="orb orb-a"
           style={{ top: "-8%", left: "6%", width: 340, height: 340, background: "#8b5cf6", opacity: 0.45 }}
@@ -98,18 +98,15 @@ export function SpaceBackdrop() {
           glow="rgba(139,92,246,0.55)"
         />
       </div>
-    );
-  }
-
-  return (
-    <div className="fixed inset-0 -z-10 overflow-hidden" style={NEBULA_LAYER}>
-      <div className="stars-layer absolute inset-0" style={STARS_LAYER} />
-      <Meteors meteors={METEORS} color="rgba(255,255,255,0.95)" />
-      <Asteroids
-        asteroids={ASTEROIDS}
-        background="radial-gradient(circle at 35% 30%, #fff, rgba(210,200,190,0.85) 45%, rgba(150,140,130,0.75) 100%)"
-        glow="rgba(220,225,255,0.85)"
-      />
+      <div className="fixed inset-0 -z-10 hidden overflow-hidden dark:block" style={NEBULA_LAYER}>
+        <div className="stars-layer absolute inset-0" style={STARS_LAYER} />
+        <Meteors meteors={METEORS} color="rgba(255,255,255,0.95)" />
+        <Asteroids
+          asteroids={ASTEROIDS}
+          background="radial-gradient(circle at 35% 30%, #fff, rgba(210,200,190,0.85) 45%, rgba(150,140,130,0.75) 100%)"
+          glow="rgba(220,225,255,0.85)"
+        />
+      </div>
     </div>
   );
 }

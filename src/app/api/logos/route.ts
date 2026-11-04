@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { apiErrorResponse } from "@/lib/server/errors";
 import { getSupabase } from "@/lib/db";
 import { requireUser, unauthorizedResponse } from "@/lib/auth/session";
 import {
@@ -77,13 +78,7 @@ export async function POST(request: Request) {
       contentType: logoMimeOf(ext),
     } satisfies LogoTicket);
   } catch (error) {
-    const unauthorized = unauthorizedResponse(error);
-    if (unauthorized) return unauthorized;
-    console.error("create logo upload url failed:", error);
-    return NextResponse.json(
-      { error: error instanceof Error ? error.message : "Unexpected error" },
-      { status: 500 }
-    );
+    return apiErrorResponse(error, "logos");
   }
 }
 
@@ -111,12 +106,6 @@ export async function DELETE(request: Request) {
     }
     return NextResponse.json({ removed: true });
   } catch (error) {
-    const unauthorized = unauthorizedResponse(error);
-    if (unauthorized) return unauthorized;
-    console.error("remove logo failed:", error);
-    return NextResponse.json(
-      { error: error instanceof Error ? error.message : "Unexpected error" },
-      { status: 500 }
-    );
+    return apiErrorResponse(error, "logos");
   }
 }

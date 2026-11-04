@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { apiErrorResponse } from "@/lib/server/errors";
 import { getSupabase } from "@/lib/db";
 import {
   buildPayload,
@@ -13,7 +14,7 @@ import {
 import { AVATARS } from "@/lib/avatars";
 import { TEMPLATE_UNAVAILABLE_MESSAGE, isTemplateAvailable } from "@/lib/templates";
 import type { CaseStudyBinding, Chunk } from "@/lib/types";
-import { requireUser, unauthorizedResponse } from "@/lib/auth/session";
+import { requireUser } from "@/lib/auth/session";
 import { logActivity } from "@/lib/activity";
 import { DOMAIN_AVATAR_PREFIX } from "@/lib/domainAvatars";
 import { isNotMigratedError } from "@/lib/sceneImages";
@@ -125,12 +126,6 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
     });
     return NextResponse.json({ project: rowToProjectSummary(data as unknown as ProjectSummaryRow) });
   } catch (error) {
-    const unauthorized = unauthorizedResponse(error);
-    if (unauthorized) return unauthorized;
-    console.error("update selection failed:", error);
-    return NextResponse.json(
-      { error: error instanceof Error ? error.message : "Unexpected error" },
-      { status: 500 }
-    );
+    return apiErrorResponse(error, "update selection");
   }
 }

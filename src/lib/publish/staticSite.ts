@@ -9,12 +9,20 @@ import {
   narrationDockMarkup,
   type NarrationDockThemeId,
 } from "@/lib/narrationDock";
-import { CHAPTER_IMAGE_CSS, chapterImageHtml, injectStoryLogo } from "@/components/templates/storyMedia";
+import {
+  CHAPTER_IMAGE_CSS,
+  chapterImageHtml,
+  escapeHtml,
+  injectStoryLogo,
+  safeUrl,
+  storagePublicUrl,
+} from "@/components/templates/storyMedia";
 import {
   CHAPTER_LAYOUT_BOOT,
   CHAPTER_LAYOUT_CSS,
   CHAPTER_LAYOUT_JS,
   CHAPTER_THEMES,
+  TEMPLATE_SANS,
   chapterLayoutHtml,
   chapterLists,
   type ChapterTheme,
@@ -47,18 +55,14 @@ function dedupeScripts(urls: string[]): string[] {
   return Array.from(new Set(urls));
 }
 
-function escapeHtml(input: string): string {
-  return input
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#39;");
+/** An escaped, allow-listed URL for a src/href attribute ("" when the URL is not allowed). */
+function attrUrl(url: string | null | undefined): string {
+  return escapeHtml(safeUrl(url));
 }
 
 function audioUrl(supabaseUrl: string, projectId: string, chunk: Chunk): string | null {
   if (!chunk.audioUrl) return null;
-  return `${supabaseUrl}/storage/v1/object/public/chunk-audio/${projectId}/${chunk.id}.mp3`;
+  return storagePublicUrl(supabaseUrl, "chunk-audio", projectId, `${chunk.id}.mp3`);
 }
 
 function sectionAudioUrl(
@@ -68,7 +72,7 @@ function sectionAudioUrl(
   sectionAudio: Record<string, string> | undefined
 ): string | null {
   if (!sectionAudio?.[section.key]) return null;
-  return `${supabaseUrl}/storage/v1/object/public/chunk-audio/${projectId}/case-study-${section.key}.mp3`;
+  return storagePublicUrl(supabaseUrl, "chunk-audio", projectId, `case-study-${section.key}.mp3`);
 }
 
 /** Strips the leading slash so the path works as a relative reference inside the deploy bundle. */
@@ -95,9 +99,11 @@ function avatarBoxHtml(avatarImage: string | null, avatar: Avatar | undefined): 
   // An avatar with a video always shows that video, in every template —
   // ahead of its 3D model or still images.
   if (avatar?.videoUrls && avatar.videoUrls.length > 0) return avatarVideoBoxHtml(avatar.videoUrls[0]);
-  if (!avatarImage) return "";
-  const modelAttr = avatar?.modelUrl ? ` data-model="${bundlePath(avatar.modelUrl)}"` : "";
-  return `<div class="avatar-box"${modelAttr}><img src="${avatarImage}" alt="" decoding="async" /></div>`;
+  const src = attrUrl(avatarImage);
+  if (!src) return "";
+  const model = avatar?.modelUrl ? attrUrl(bundlePath(avatar.modelUrl)) : "";
+  const modelAttr = model ? ` data-model="${model}"` : "";
+  return `<div class="avatar-box"${modelAttr}><img src="${src}" alt="" decoding="async" /></div>`;
 }
 
 /** Video-mode avatar slot — a template-level choice (only Lunar asks for
@@ -107,12 +113,14 @@ function avatarBoxHtml(avatarImage: string | null, avatar: Avatar | undefined): 
  *  template's own scroll-activation JS calls play()/pause() on it exactly
  *  like it already does for narration audio (see activateSection). */
 function avatarVideoBoxHtml(videoUrl: string | undefined): string {
-  if (!videoUrl) return "";
-  const fallback = avatarVideoFallbackUrl(videoUrl);
+  const src = videoUrl ? attrUrl(bundlePath(videoUrl)) : "";
+  if (!src) return "";
+  const fallbackPath = avatarVideoFallbackUrl(videoUrl!);
+  const fallback = fallbackPath ? attrUrl(bundlePath(fallbackPath)) : "";
   if (fallback) {
-    return `<div class="avatar-box"><video muted loop playsinline preload="metadata"><source src="${bundlePath(videoUrl)}" type="video/webm" /><source src="${bundlePath(fallback)}" type="video/mp4" /></video></div>`;
+    return `<div class="avatar-box"><video muted loop playsinline preload="metadata"><source src="${src}" type="video/webm" /><source src="${fallback}" type="video/mp4" /></video></div>`;
   }
-  return `<div class="avatar-box"><video src="${bundlePath(videoUrl)}" muted loop playsinline preload="metadata"></video></div>`;
+  return `<div class="avatar-box"><video src="${src}" muted loop playsinline preload="metadata"></video></div>`;
 }
 
 /**
@@ -134,8 +142,10 @@ function chapterBlock(opts: {
   lists: ReturnType<typeof chapterLists>;
 }): string {
   const media: { kind: "scene" | "avatar"; html: string }[] = [];
-  if (opts.sceneUrl) media.push({ kind: "scene", html: chapterImageHtml(opts.sceneUrl) });
+  const scene = opts.sceneUrl ? chapterImageHtml(opts.sceneUrl) : "";
+  if (scene) media.push({ kind: "scene", html: scene });
   if (opts.avatarMarkup) media.push({ kind: "avatar", html: opts.avatarMarkup });
+  const audioSrc = attrUrl(opts.audioSrc);
   return chapterLayoutHtml({
     theme: opts.theme,
     index: opts.index,
@@ -143,7 +153,7 @@ function chapterBlock(opts: {
     eyebrow: opts.eyebrow,
     title: opts.title,
     textHtml: opts.textHtml,
-    audioHtml: opts.audioSrc ? `<audio src="${opts.audioSrc}"></audio>` : "",
+    audioHtml: audioSrc ? `<audio src="${audioSrc}"></audio>` : "",
     media,
     lists: opts.lists,
   });
@@ -175,7 +185,7 @@ function sectionVideoPath(
   sectionVideo: Record<string, string> | undefined
 ): string | undefined {
   if (sectionVideo?.[section.key]) {
-    return `${supabaseUrl}/storage/v1/object/public/chunk-video/${projectId}/case-study-${section.key}.mp4`;
+    return storagePublicUrl(supabaseUrl, "chunk-video", projectId, `case-study-${section.key}.mp4`);
   }
   return avatarVideoPath(index, avatar);
 }
@@ -479,7 +489,9 @@ function narrationGateCss(opts: { isDark: boolean; accent: string; border: strin
 #narration-gate .gate-card p{margin:0;font-size:.9375rem;line-height:1.5;color:rgba(255,255,255,.75);}
 #narration-gate button{font:inherit;cursor:pointer;}
 #narration-start{border:0;border-radius:999px;padding:12px 28px;font-size:1rem;font-weight:500;background:${opts.accent};color:#000;}
-#narration-skip{border:0;background:none;padding:4px;font-size:.8125rem;color:rgba(255,255,255,.55);text-decoration:underline;}
+#narration-skip{border:0;background:none;padding:4px;font-size:.8125rem;color:rgba(255,255,255,.7);text-decoration:underline;}
+#narration-start:focus-visible,#narration-skip:focus-visible{outline:2px solid #fff;outline-offset:3px;}
+@media(prefers-reduced-motion:reduce){#narration-gate{transition:none;}}
 ${NARRATION_DOCK_CSS}`;
 }
 
@@ -490,9 +502,9 @@ function hasChunkNarration(project: Project, supabaseUrl: string): boolean {
 function narrationGateMarkup(hasNarration: boolean, dock: NarrationDockThemeId): string {
   if (!hasNarration) return "";
   return `
-<div id="narration-gate" role="dialog" aria-label="Start narration">
+<div id="narration-gate" role="dialog" aria-modal="true" aria-label="Start narration" aria-describedby="narration-gate-text">
   <div class="gate-card">
-    <p>This story is narrated. Narration plays automatically as you scroll.</p>
+    <p id="narration-gate-text">This story is narrated. Narration plays automatically as you scroll.</p>
     <button type="button" id="narration-start">Tap to start</button>
     <button type="button" id="narration-skip">Continue without sound</button>
   </div>
@@ -514,6 +526,24 @@ var narrationToggle = ndPause;
 
 function syncNarrationDock() { ndSync(narrationPaused || !narrationEnabled); }
 
+// The start gate is a modal dialog: focus starts on "Tap to start", Tab stays
+// inside it, Esc means "Continue without sound". Once hidden it is inert so its
+// buttons leave the tab order.
+function showGate() {
+  if (!narrationGate) return;
+  narrationGate.classList.remove('hidden');
+  narrationGate.removeAttribute('inert');
+  narrationGate.removeAttribute('aria-hidden');
+  var start = document.getElementById('narration-start');
+  if (start) { try { start.focus({ preventScroll: true }); } catch (e) { start.focus(); } }
+}
+function hideGate() {
+  if (!narrationGate) return;
+  narrationGate.classList.add('hidden');
+  narrationGate.setAttribute('inert', '');
+  narrationGate.setAttribute('aria-hidden', 'true');
+}
+
 function playNarration(audio) {
   if (!narrationEnabled || narrationPaused) return;
   audio.play().catch(function(err) {
@@ -521,7 +551,8 @@ function playNarration(audio) {
     // than failing silently.
     if (err && err.name === 'NotAllowedError' && narrationGate) {
       narrationEnabled = false;
-      narrationGate.classList.remove('hidden');
+      syncNarrationDock();
+      showGate();
     }
   });
 }
@@ -598,7 +629,7 @@ function enableNarration() {
       audio.currentTime = 0;
     }).catch(function(){}).then(function() { audio.muted = false; });
   });
-  if (narrationGate) narrationGate.classList.add('hidden');
+  hideGate();
   ndShow();
   syncNarrationDock();
   Promise.all(primes).then(function() {
@@ -607,14 +638,30 @@ function enableNarration() {
   });
 }
 
+// "Continue without sound": nothing plays, so the words stay at full colour
+// (they only dim while a chapter's audio is playing, see chapterLayout.ts).
+function continueWithoutSound() {
+  hideGate();
+  narrationPaused = true;
+  if (currentAudio) currentAudio.pause();
+  ndShow();
+  syncNarrationDock();
+}
+
 if (narrationGate) {
-  document.getElementById('narration-start').addEventListener('click', enableNarration);
-  document.getElementById('narration-skip').addEventListener('click', function() {
-    narrationGate.classList.add('hidden');
-    narrationPaused = true;
-    ndShow();
-    syncNarrationDock();
+  var gateStart = document.getElementById('narration-start');
+  var gateSkip = document.getElementById('narration-skip');
+  gateStart.addEventListener('click', enableNarration);
+  gateSkip.addEventListener('click', continueWithoutSound);
+  narrationGate.addEventListener('keydown', function(e) {
+    if (narrationGate.classList.contains('hidden')) return;
+    if (e.key === 'Escape') { e.preventDefault(); continueWithoutSound(); return; }
+    if (e.key !== 'Tab') return;
+    if (e.shiftKey && document.activeElement === gateStart) { e.preventDefault(); gateSkip.focus(); }
+    else if (!e.shiftKey && document.activeElement === gateSkip) { e.preventDefault(); gateStart.focus(); }
+    else if (document.activeElement !== gateStart && document.activeElement !== gateSkip) { e.preventDefault(); gateStart.focus(); }
   });
+  showGate();
 }
 
 if (narrationToggle) {
@@ -654,7 +701,7 @@ document.querySelectorAll('.section').forEach(function(section){
 /** Fixed full-page canvas + custom cursor dot — shared by every space-themed render (the standalone Space template and the case-study layout when it opts into the Space background). */
 const ASMR_CSS = `
 :root{color-scheme:dark}
-body{margin:0;font-family:-apple-system,'Segoe UI',sans-serif;background:#0A0A0C;color:#fff;}
+body{margin:0;font-family:${TEMPLATE_SANS};background:#0A0A0C;color:#fff;}
 #asmr-canvas{position:fixed;inset:0;z-index:-10;display:block;width:100%;height:100%;background:#0A0A0C;}
 #asmr-cursor{position:fixed;left:0;top:0;z-index:50;width:16px;height:16px;border-radius:9999px;border:1px solid rgba(255,255,255,.2);pointer-events:none;transition:transform .075s ease-out;}
 `;
@@ -742,6 +789,26 @@ const ASMR_INIT_JS = `
     for (var i = 0; i < PARTICLE_COUNT; i++) particles.push(new Particle());
   }
 
+  // Reduced motion: one still frame of the field (redrawn on resize), no
+  // animation loop, no pointer-following cursor dot.
+  if (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+    if (cursor) cursor.style.display = 'none';
+    var drawStill = function() {
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.fillStyle = '#0A0A0C';
+      ctx.fillRect(0, 0, width, height);
+      for (var i = 0; i < particles.length; i++) particles[i].draw();
+    };
+    init();
+    drawStill();
+    var stillFrame = 0;
+    window.addEventListener('resize', function() {
+      if (stillFrame) return;
+      stillFrame = requestAnimationFrame(function() { stillFrame = 0; init(); drawStill(); });
+    });
+    return;
+  }
+
   var cursorX = -1000, cursorY = -1000, cursorDirty = false;
   function render() {
     animationFrameId = requestAnimationFrame(render);
@@ -793,7 +860,7 @@ const ASMR_INIT_JS = `
  */
 const LUNAR_CSS = `
 :root{color-scheme:dark}
-body{margin:0;font-family:-apple-system,'Segoe UI',sans-serif;background:#000;color:#fff;}
+body{margin:0;font-family:${TEMPLATE_SANS};background:#000;color:#fff;}
 .lunar-hero{width:100%;min-height:100vh;background:#09090b;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:16px;box-sizing:border-box;}
 @media(min-width:640px){.lunar-hero{padding:40px;}}
 .lunar-hero-inner{position:relative;width:100%;max-width:1000px;}
@@ -803,7 +870,7 @@ body{margin:0;font-family:-apple-system,'Segoe UI',sans-serif;background:#000;co
 @media(min-width:768px){.lunar-card-fade{top:0;bottom:0;height:100%;width:60%;background:linear-gradient(to right,#000,rgba(0,0,0,.9),transparent);}}
 .lunar-card-copy{width:100%;display:flex;flex-direction:column;justify-content:center;padding:48px 40px;position:relative;z-index:20;pointer-events:none;box-sizing:border-box;}
 @media(min-width:768px){.lunar-card-copy{width:45%;padding:0 0 0 64px;}}
-.lunar-card-copy h1{font-size:var(--lunar-title-m);font-weight:700;letter-spacing:-0.05em;line-height:.9;margin:0 0 24px;}
+.lunar-card-copy h1{font-size:var(--lunar-title-m);font-weight:700;letter-spacing:-0.05em;line-height:.9;margin:0 0 24px;overflow-wrap:break-word;hyphens:auto;}
 @media(min-width:768px){.lunar-card-copy h1{font-size:var(--lunar-title-d);}}
 .lunar-title-lead{color:#fafafa;filter:drop-shadow(0 1px 2px rgba(0,0,0,.15));}
 .lunar-title-accent{color:transparent;background-image:linear-gradient(to bottom,#fff,#a1a1aa,#27272a);-webkit-background-clip:text;background-clip:text;filter:drop-shadow(0 3px 3px rgba(0,0,0,.12));}
@@ -877,6 +944,16 @@ const LUNAR_INIT_JS = `
   var slot = document.getElementById('lunar-slot');
   if (!canvas || !slot || !window.THREE) return;
   var card = slot.parentElement;
+  // Reduced motion: no idle spin, no scroll-driven turn, no drifting comets; the
+  // ring and belt appear already formed, and a frame is drawn only when
+  // something changes (scroll, resize, drag, a texture arriving).
+  var reduced = !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+  var frameQueued = false;
+  function requestFrame() {
+    if (!reduced || frameQueued) return;
+    frameQueued = true;
+    requestAnimationFrame(tick);
+  }
 
   var renderer = new THREE.WebGLRenderer({ canvas: canvas, antialias: true, alpha: true, powerPreference: 'high-performance' });
   // Full-window canvas: cap the pixel ratio so a 60fps frame stays cheap.
@@ -910,8 +987,12 @@ const LUNAR_INIT_JS = `
   var resizeFrame = 0;
   window.addEventListener('resize', function() {
     if (resizeFrame) return;
-    resizeFrame = requestAnimationFrame(function() { resizeFrame = 0; resize(); });
+    resizeFrame = requestAnimationFrame(function() { resizeFrame = 0; resize(); requestFrame(); });
   });
+  if (reduced) {
+    window.addEventListener('scroll', requestFrame, { passive: true });
+    controls.addEventListener('change', requestFrame);
+  }
 
   // Scroll-driven hand-off from card to page background. At scrollY 0 the
   // scene is framed and clipped exactly to the card's scene slot (identical
@@ -931,7 +1012,7 @@ const LUNAR_INIT_JS = `
   function layout(dt) {
     var vw = window.innerWidth, vh = window.innerHeight;
     var target = Math.min(1, Math.max(0, window.scrollY / (vh * 0.85)));
-    if (!easedInit) { easedP = target; easedInit = true; }
+    if (!easedInit || reduced) { easedP = target; easedInit = true; }
     easedP += (target - easedP) * (1 - Math.pow(0.001, dt));
     if (Math.abs(target - easedP) < 0.0005) easedP = target;
     var p = easedP;
@@ -977,6 +1058,7 @@ const LUNAR_INIT_JS = `
       scene.environment = pmrem.fromEquirectangular(hdr).texture;
       hdr.dispose();
       pmrem.dispose();
+      requestFrame();
     });
   }
 
@@ -995,7 +1077,7 @@ const LUNAR_INIT_JS = `
   scene.add(group);
 
   var textureLoader = new THREE.TextureLoader();
-  var moonTexture = textureLoader.load('${LUNAR_MOON_TEXTURE_URL}');
+  var moonTexture = textureLoader.load('${LUNAR_MOON_TEXTURE_URL}', function() { requestFrame(); });
   moonTexture.encoding = THREE.sRGBEncoding;
 
   var RADIUS = 2.0;
@@ -1024,6 +1106,7 @@ const LUNAR_INIT_JS = `
   var pendingMove = null;
   canvas.addEventListener('pointermove', function(e) {
     pendingMove = { clientX: e.clientX, clientY: e.clientY };
+    requestFrame();
   }, { passive: true });
   function processPointerMove() {
     if (!pendingMove) return;
@@ -1044,7 +1127,7 @@ const LUNAR_INIT_JS = `
   canvas.addEventListener('pointerdown', function(e) { downX = e.clientX; downY = e.clientY; });
   canvas.addEventListener('click', function(e) {
     if (Math.abs(e.clientX - downX) + Math.abs(e.clientY - downY) > 4) return;
-    if (hitsMoon(e) && ringState === 'hidden') ringState = 'animating';
+    if (hitsMoon(e) && ringState === 'hidden') { ringState = 'animating'; requestFrame(); }
   });
 
   var PARTICLE_COUNT = 48000;
@@ -1157,7 +1240,7 @@ const LUNAR_INIT_JS = `
   }
 
   var ASTEROID_COUNT = 60;
-  var asteroidTexture = textureLoader.load('${LUNAR_MOON_TEXTURE_URL}');
+  var asteroidTexture = textureLoader.load('${LUNAR_MOON_TEXTURE_URL}', function() { requestFrame(); });
   asteroidTexture.encoding = THREE.sRGBEncoding;
   var asteroids = generateAsteroids(ASTEROID_COUNT);
   var asteroidMesh = new THREE.InstancedMesh(
@@ -1207,7 +1290,7 @@ const LUNAR_INIT_JS = `
   var lastScrollY = window.scrollY;
 
   function updateComets(delta, scrollDelta) {
-    var visible = backgroundProgress > 0.02;
+    var visible = backgroundProgress > 0.02 && !reduced;
     var tanHalf = Math.tan((camera.fov * Math.PI) / 360);
     comets.forEach(function(c) {
       c.mesh.visible = visible;
@@ -1262,7 +1345,8 @@ const LUNAR_INIT_JS = `
   var start = performance.now() / 1000;
   var last = start;
   function tick(timestamp) {
-    requestAnimationFrame(tick);
+    if (reduced) frameQueued = false;
+    else requestAnimationFrame(tick);
     var now = (timestamp || performance.now()) / 1000;
     var delta = Math.min(0.05, Math.max(0, now - last));
     last = now;
@@ -1289,16 +1373,16 @@ const LUNAR_INIT_JS = `
     // towards its target (exponential smoothing) instead of jumping by
     // each wheel notch — a wheel scroll arrives in ~100px steps, which read
     // as the moon ratcheting round like a wheel.
-    moonScrollTarget += scrollDelta * 0.0012;
+    if (!reduced) moonScrollTarget += scrollDelta * 0.0012;
     var ease = 1 - Math.exp(-delta * 3);
     var moonScrollStep = (moonScrollTarget - moonScrollTurn) * ease;
     moonScrollTurn += moonScrollStep;
-    moon.rotation.y += delta * 0.03 + moonScrollStep;
+    if (!reduced) moon.rotation.y += delta * 0.03 + moonScrollStep;
     smoothedScrollVelocity += ((scrollDelta / Math.max(delta, 0.001)) - smoothedScrollVelocity) * ease;
 
     // ParticleRing (reads the asteroid positions from the previous frame,
     // same useFrame order as the React version: Moon, Ring, AsteroidBelt).
-    ring.rotation.y -= delta * 0.012;
+    if (!reduced) ring.rotation.y -= delta * 0.012;
     ring.updateMatrix();
     var invMat = scratchMatrix.copy(ring.matrix).invert();
     var localAsteroids = localAsteroidBuffer;
@@ -1312,8 +1396,10 @@ const LUNAR_INIT_JS = `
       localAsteroids[i * 4 + 3] = massiveAsteroids[i * 4 + 3];
     }
     ringUniforms.uAsteroids.value = localAsteroids;
-    ringUniforms.time.value = (now - start) * SPEED;
-    if (ringState === 'animating') {
+    if (!reduced) ringUniforms.time.value = (now - start) * SPEED;
+    if (reduced && ringState !== 'hidden') {
+      ringUniforms.uProgress.value = 1.0;
+    } else if (ringState === 'animating') {
       ringUniforms.uProgress.value = Math.min(1.0, ringUniforms.uProgress.value + delta * 0.35);
     } else if (ringState === 'visible') {
       ringUniforms.uProgress.value = 1.0;
@@ -1324,14 +1410,16 @@ const LUNAR_INIT_JS = `
     // AsteroidBelt
     var targetScale = ringState === 'hidden' ? 0 : 1;
     var lerpSpeed = ringState === 'hidden' ? 5 : 2;
-    asteroidScale = asteroidScale + (targetScale - asteroidScale) * (delta * lerpSpeed);
+    asteroidScale = reduced ? targetScale : asteroidScale + (targetScale - asteroidScale) * (delta * lerpSpeed);
     if (asteroidScale < 0.01) {
       asteroidMesh.visible = false;
     } else {
       asteroidMesh.visible = true;
       asteroids.forEach(function(ast, i) {
-        ast.angle += ast.speed * delta * SPEED;
-        ast.phase += ast.radialSpeed * delta * SPEED;
+        if (!reduced) {
+          ast.angle += ast.speed * delta * SPEED;
+          ast.phase += ast.radialSpeed * delta * SPEED;
+        }
         var currentRadius = ast.baseRadius + Math.sin(ast.phase) * ast.radialAmplitude;
         if (currentRadius < 2.15) currentRadius = 2.15 + (2.15 - currentRadius) * 0.85;
         var x = Math.cos(ast.angle) * currentRadius;
@@ -1340,7 +1428,7 @@ const LUNAR_INIT_JS = `
         massiveAsteroids[i * 4 + 1] = y;
         massiveAsteroids[i * 4 + 2] = ast.zOffset;
         massiveAsteroids[i * 4 + 3] = ast.scale;
-        ast.rx += ast.rsx * spin; ast.ry += ast.rsy * spin; ast.rz += ast.rsz * spin;
+        if (!reduced) { ast.rx += ast.rsx * spin; ast.ry += ast.rsy * spin; ast.rz += ast.rsz * spin; }
         dummy.position.set(x, y, ast.zOffset);
         dummy.rotation.set(ast.rx, ast.ry, ast.rz);
         dummy.scale.setScalar(ast.scale * asteroidScale);
@@ -1364,14 +1452,12 @@ function renderSpace(project: Project, avatars: Avatar[], supabaseUrl: string): 
     ASMR_CSS +
     `
 .header{position:relative;padding:96px 32px 64px;}
-.header .kicker{font-size:.75rem;font-weight:300;text-transform:uppercase;letter-spacing:.4em;color:rgba(255,255,255,.3);}
+.header .kicker{font-size:.75rem;font-weight:300;text-transform:uppercase;letter-spacing:.4em;color:rgba(255,255,255,.62);}
 .header h1{margin:16px 0 0;max-width:760px;font-size:1.5rem;font-weight:500;line-height:1.2;}
 @media(min-width:768px){.header h1{font-size:1.75rem;}}
 .section{position:relative;border-top:1px solid rgba(255,255,255,.05);padding:64px 24px;box-sizing:border-box;}
 @media(min-width:768px){.section{padding:96px 48px;}}
 .big-text{font-weight:500;line-height:1.5;letter-spacing:-0.01em;font-size:clamp(0.9375rem, 1.25vw, 1.125rem);margin:0;}
-.word{color:rgba(255,255,255,.25);transition:color .15s;}
-.word.spoken{color:#fff;}
 ` +
   narrationGateCss({ isDark: true, accent: "#fff", border: "rgba(255,255,255,.15)" }) +
   AVATAR_BOX_CSS;
@@ -1431,14 +1517,12 @@ function renderLunar(project: Project, avatars: Avatar[], supabaseUrl: string): 
     LUNAR_CSS +
     `
 .header{position:relative;padding:96px 32px 64px;}
-.header .kicker{font-size:.75rem;font-weight:300;text-transform:uppercase;letter-spacing:.4em;color:rgba(103,232,249,.4);}
+.header .kicker{font-size:.75rem;font-weight:300;text-transform:uppercase;letter-spacing:.4em;color:rgba(103,232,249,.75);}
 .header h1{margin:16px 0 0;max-width:760px;font-size:1.5rem;font-weight:500;line-height:1.2;}
 @media(min-width:768px){.header h1{font-size:1.75rem;}}
 .section{position:relative;border-top:1px solid rgba(34,211,238,.1);padding:64px 24px;box-sizing:border-box;}
 @media(min-width:768px){.section{padding:96px 48px;}}
 .big-text{font-weight:500;line-height:1.5;letter-spacing:-0.01em;font-size:clamp(0.9375rem, 1.25vw, 1.125rem);margin:0;}
-.word{color:rgba(255,255,255,.25);transition:color .15s;}
-.word.spoken{color:#fff;}
 ` +
     narrationGateCss({ isDark: true, accent: "#67e8f9", border: "rgba(103,232,249,.2)" }) +
     AVATAR_BOX_CSS;
@@ -1499,14 +1583,17 @@ ${TRACK_HIGHLIGHT_JS}
   );
 }
 
-const AIRLOCK_VIDEO_CDN = "https://cdn.jsdelivr.net/gh/yuraoak/airlock-hero-assets@main";
+// Pinned to one commit (02 Sep 2026; the repo moved from yuraoak to yura-build) so a
+// change upstream can never alter or blank published heroes. Same files as @main on 04 Nov 2026.
+const AIRLOCK_VIDEO_CDN =
+  "https://cdn.jsdelivr.net/gh/yura-build/airlock-hero-assets@c3a711953c185f314802a8e016527abf98f82f5e";
 const AIRLOCK_VIDEO_SRC = `${AIRLOCK_VIDEO_CDN}/iss-hero-1080p.mp4`;
 const AIRLOCK_POSTER_SRC = `${AIRLOCK_VIDEO_CDN}/iss-hero-poster.jpg`;
-const AIRLOCK_SANS = "-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif";
+const AIRLOCK_SANS = TEMPLATE_SANS;
 
 const AIRLOCK_CSS = `
 :root{color-scheme:dark}
-body{margin:0;font-family:-apple-system,'Segoe UI',sans-serif;background:#05070d;color:#f2f4f8;}
+body{margin:0;font-family:${TEMPLATE_SANS};background:#05070d;color:#f2f4f8;}
 #airlock-hero{position:relative;height:100dvh;width:100%;overflow:hidden;background:#05070d;}
 #airlock-video{position:absolute;inset:0;height:100%;width:100%;object-fit:cover;opacity:0;transform-origin:center center;will-change:transform;transition:opacity .6s ease;}
 .airlock-overlay{pointer-events:none;position:absolute;inset:0;}
@@ -1526,8 +1613,6 @@ body{margin:0;font-family:-apple-system,'Segoe UI',sans-serif;background:#05070d
 .section{border-top:1px solid rgba(255,255,255,.05);padding:64px 24px;box-sizing:border-box;}
 @media(min-width:768px){.section{padding:96px 48px;}}
 .big-text{font-weight:500;line-height:1.5;letter-spacing:-0.01em;font-size:clamp(0.9375rem, 1.25vw, 1.125rem);margin:0;}
-.word{color:rgba(255,255,255,.25);transition:color .15s;}
-.word.spoken{color:#fff;}
 ` +
   narrationGateCss({ isDark: true, accent: "#fff", border: "rgba(255,255,255,.15)" }) +
   AVATAR_BOX_CSS;
@@ -1786,8 +1871,9 @@ function renderCaseStudy(project: Project, avatars: Avatar[], supabaseUrl: strin
       ? project.selectedTemplateId
       : "light";
   const isDark = theme !== "light";
-  const kicker = theme === "space" ? "Space" : theme === "lunar" ? "Lunar" : "Case study";
-  const kickerColor = theme === "lunar" ? "rgba(103,232,249,.4)" : isDark ? "rgba(255,255,255,.3)" : "#a3a3a3";
+  // The light layout shows no kicker, like its React preview (CaseStudyTemplate THEME_CONFIG).
+  const kicker = theme === "space" ? "Space" : theme === "lunar" ? "Lunar" : "";
+  const kickerColor = theme === "lunar" ? "rgba(103,232,249,.75)" : isDark ? "rgba(255,255,255,.62)" : "#737373";
   const borderColor = theme === "lunar" ? "rgba(34,211,238,.1)" : isDark ? "rgba(255,255,255,.05)" : "#f0f0f0";
   // Deliberately more opaque than borderColor/section dividers above: this is
   // the actual glass card the body copy sits on. No blur — a dark, mostly
@@ -1806,17 +1892,15 @@ function renderCaseStudy(project: Project, avatars: Avatar[], supabaseUrl: strin
         : theme === "airlock"
           ? AIRLOCK_CSS
           : ASMR_CSS
-      : `:root{color-scheme:light}\nbody{margin:0;font-family:-apple-system,'Segoe UI',sans-serif;background:#fff;color:#171717;}`) +
+      : `:root{color-scheme:light}\nbody{margin:0;font-family:${TEMPLATE_SANS};background:#fff;color:#171717;}`) +
     `
 .header{${isDark ? "position:relative;" : ""}padding:96px 32px 64px;}
 .header .kicker{font-size:.75rem;text-transform:uppercase;letter-spacing:${isDark ? ".4em" : ".05em"};font-weight:${isDark ? "300" : "400"};color:${kickerColor};}
-.header h1{margin:12px 0 0;max-width:760px;font-size:1.5rem;font-weight:500;line-height:1.2;}
+.header h1{margin:${isDark ? "16px" : "0"} 0 0;max-width:760px;font-size:1.5rem;font-weight:500;line-height:1.2;}
 @media(min-width:768px){.header h1{font-size:1.75rem;}}
 .section{${isDark ? "position:relative;" : ""}border-top:1px solid ${borderColor};padding:64px 24px;box-sizing:border-box;}
 @media(min-width:768px){.section{padding:96px 48px;}}
 .big-text{font-weight:500;line-height:1.5;letter-spacing:-0.01em;font-size:clamp(0.9375rem, 1.25vw, 1.125rem);margin:0;}
-.word{color:${isDark ? "rgba(255,255,255,.25)" : "#d4d4d4"};transition:color .15s;}
-.word.spoken{color:${isDark ? "#fff" : "#171717"};}
 ` +
     narrationGateCss({ isDark, accent: theme === "lunar" ? "#67e8f9" : "#fff", border: panelBorderColor }) +
     AVATAR_BOX_CSS;
@@ -1862,7 +1946,7 @@ function renderCaseStudy(project: Project, avatars: Avatar[], supabaseUrl: strin
       ? airlockHeroMarkup(project.title)
       : theme === "lunar"
         ? lunarCardHeroMarkup(project.title, lunarHeroDescription(sections[0]?.body))
-        : `${backdropMarkup}\n<header class="header"><span class="kicker">${kicker}</span><h1>${escapeHtml(project.title)}</h1></header>`;
+        : `${backdropMarkup}\n<header class="header">${kicker ? `<span class="kicker">${kicker}</span>` : ""}<h1>${escapeHtml(project.title)}</h1></header>`;
 
   const hasNarration = sections.some((section) => sectionAudioUrl(supabaseUrl, project.id, section, sectionAudio));
 

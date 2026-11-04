@@ -8,7 +8,7 @@ import { avatarForIndex, type TemplateProps } from "./types";
 import { LunarHero } from "./LunarHero";
 import { AvatarDisplay } from "./AvatarDisplay";
 import { ChapterLayout, SceneImg, type ChapterMediaItem } from "./ChapterLayout";
-import { CHAPTER_THEMES, chapterLists } from "@/lib/chapterLayout";
+import { CHAPTER_THEMES, TEMPLATE_SANS, chapterLists } from "@/lib/chapterLayout";
 import { StoryLogo } from "./StoryLogo";
 import { NarrationMasterControl } from "@/components/ui/NarrationMasterControl";
 import { NARRATION_DOCK_THEMES } from "@/lib/narrationDock";
@@ -51,9 +51,10 @@ export default function LunarTemplate({ title, chunks, avatars, logoUrl }: Templ
         // Only the words between the previous and the new position are
         // touched; the first event after a (re)start repaints them all.
         let shown = -2;
+        // Colours come from the shared chapter layout CSS: words dim only while
+        // this chapter's audio plays (cl-live), so the text is readable without sound.
         function setSpoken(word: HTMLElement, spoken: boolean) {
-          word.classList.toggle("text-white", spoken);
-          word.classList.toggle("text-white/25", !spoken);
+          word.classList.toggle("spoken", spoken);
         }
         function onTimeUpdate() {
           if (!audio.duration) return;
@@ -125,7 +126,7 @@ export default function LunarTemplate({ title, chunks, avatars, logoUrl }: Templ
   }, [chunks]);
 
   return (
-    <div ref={containerRef} className="relative bg-black text-white">
+    <div ref={containerRef} className="relative bg-black text-white" style={{ fontFamily: TEMPLATE_SANS }}>
       <NarrationMasterControl theme={NARRATION_DOCK_THEMES.lunar} />
       <StoryLogo logoUrl={logoUrl} />
 
@@ -162,7 +163,7 @@ export default function LunarTemplate({ title, chunks, avatars, logoUrl }: Templ
                 style={{ fontSize: "clamp(0.9375rem, 1.25vw, 1.125rem)" }}
               >
                 {words.map((word, i) => (
-                  <span key={i} className="word text-white/25 transition-colors duration-150">
+                  <span key={i} className="word">
                     {word}{" "}
                   </span>
                 ))}

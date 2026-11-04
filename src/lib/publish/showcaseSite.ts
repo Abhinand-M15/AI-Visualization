@@ -2,6 +2,7 @@ import type { Chunk, Project } from "@/lib/types";
 import type { Avatar } from "@/lib/avatars";
 import { SHOWCASE_ASSET_ROOT, buildShowcaseStory } from "@/lib/showcase";
 import { SHOWCASE_CSS } from "@/lib/showcaseCss";
+import { escapeHtml, storagePublicUrl } from "@/components/templates/storyMedia";
 
 /**
  * Published (static HTML) version of the Showcase template. Unlike the other
@@ -20,10 +21,6 @@ import { SHOWCASE_CSS } from "@/lib/showcaseCss";
  * (the Supabase public URLs).
  */
 
-function escapeHtml(input: string): string {
-  return input.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
-}
-
 /** JSON for an inline <script type="application/json"> — `<` is escaped so the
  *  data can never close the tag or open a comment, and U+2028/2029 can't break a parser. */
 function inlineJson(value: unknown): string {
@@ -38,7 +35,7 @@ const bundlePath = (path: string) => path.replace(/^\//, "");
 
 function chunkAudioUrl(supabaseUrl: string, projectId: string, chunk: Chunk): string | undefined {
   if (!chunk.audioUrl) return undefined;
-  return `${supabaseUrl}/storage/v1/object/public/chunk-audio/${projectId}/${chunk.id}.mp3`;
+  return storagePublicUrl(supabaseUrl, "chunk-audio", projectId, `${chunk.id}.mp3`);
 }
 
 const PAGE_CSS = `
@@ -64,14 +61,14 @@ export function renderShowcase(project: Project, avatars: Avatar[], supabaseUrl:
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>${escapeHtml(project.title)}</title>
-<link rel="stylesheet" href="${base}/showcase.css" />
+<link rel="stylesheet" href="${escapeHtml(base)}/showcase.css" />
 <style>${PAGE_CSS}${SHOWCASE_CSS}</style>
 </head>
 <body>
 <div id="showcase-root"></div>
 <noscript><p style="padding:40px;font-family:sans-serif">This story needs JavaScript to play.</p></noscript>
 <script type="application/json" id="showcase-data">${inlineJson(story)}</script>
-<script src="${base}/showcase.js"></script>
+<script src="${escapeHtml(base)}/showcase.js"></script>
 </body>
 </html>`;
 }

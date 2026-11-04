@@ -8,6 +8,7 @@ import {
   validateLogoMeta,
   type LogoTicket,
 } from "@/app/api/logos/shared";
+import { buttonClass } from "@/components/ui/button";
 
 /**
  * Company logo picker (preview, replace, remove). Owned by stage S5b.
@@ -146,8 +147,7 @@ export async function removeLogoObject(path: string): Promise<void> {
   }
 }
 
-export const logoButtonClass =
-  "rounded-full border border-neutral-200 bg-neutral-50 px-5 py-2.5 text-base font-medium text-neutral-700 transition-colors hover:bg-neutral-100 disabled:opacity-30 dark:border-white/10 dark:bg-white/5 dark:text-indigo-100 dark:hover:bg-white/10";
+export const logoButtonClass = buttonClass("secondary", "sm");
 
 export default function LogoUpload({ value, onChange }: LogoUploadProps) {
   const available = useLogoAvailable();
@@ -200,10 +200,10 @@ export default function LogoUpload({ value, onChange }: LogoUploadProps) {
   }
 
   return (
-    <div>
-      <label className="mb-3 block text-lg font-medium text-neutral-700 dark:text-indigo-100">
-        Company logo (optional)
-      </label>
+    <div role="group" aria-labelledby="logo-upload-label" className="flex flex-col gap-2">
+      <span id="logo-upload-label" className="text-sm font-semibold text-neutral-800 dark:text-indigo-100">
+        Company logo <span className="font-normal text-muted-foreground">(optional)</span>
+      </span>
       <div className="flex flex-wrap items-center gap-4">
         {value && (
           <div className="flex h-20 w-32 items-center justify-center overflow-hidden rounded-xl border border-neutral-200 bg-white p-2 dark:border-white/10 dark:bg-white/90">
@@ -211,7 +211,7 @@ export default function LogoUpload({ value, onChange }: LogoUploadProps) {
               // eslint-disable-next-line @next/next/no-img-element
               <img src={preview} alt="Company logo preview" className="max-h-full max-w-full object-contain" />
             ) : (
-              <span className="text-center text-sm text-neutral-500">Logo uploaded</span>
+              <span className="text-center text-sm text-neutral-600">Logo uploaded</span>
             )}
           </div>
         )}
@@ -220,6 +220,8 @@ export default function LogoUpload({ value, onChange }: LogoUploadProps) {
           type="file"
           accept={LOGO_ACCEPT}
           className="hidden"
+          tabIndex={-1}
+          aria-hidden="true"
           onChange={(e) => void handleFile(e.target.files?.[0])}
         />
         <button type="button" disabled={busy} onClick={() => inputRef.current?.click()} className={logoButtonClass}>
@@ -231,11 +233,9 @@ export default function LogoUpload({ value, onChange }: LogoUploadProps) {
           </button>
         )}
       </div>
-      <p className="mt-3 text-base text-neutral-500 dark:text-indigo-200/50">
-        PNG, JPG, WebP or SVG, up to 2 MB. Shown on your published story.
-      </p>
+      <p className="text-xs text-muted-foreground">PNG, JPG, WebP or SVG, up to 2 MB. Shown on your published story.</p>
       {error && (
-        <p role="alert" className="mt-2 text-base text-red-600 dark:text-red-300">
+        <p role="alert" className="text-xs text-red-700 dark:text-red-300">
           {error}
         </p>
       )}

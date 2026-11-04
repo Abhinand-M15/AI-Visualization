@@ -72,7 +72,7 @@ export const VOYAGE_CSS = `
 @keyframes vg-tilt{0%,100%{rotate:0deg}50%{rotate:-2.5deg}}
 .vg-gap{height:100vh}
 .vg-info{display:block;padding:0 20px 40px}
-.vg-info .cl-panel{backdrop-filter:blur(22px);-webkit-backdrop-filter:blur(22px)}
+.vg-info .cl-panel,.vg-info .cl-fig-quote{backdrop-filter:blur(22px);-webkit-backdrop-filter:blur(22px)}
 .vg-root .cl-pill{color:var(--cl-pill-text);font-size:.8125rem;font-weight:500}
 .vg-cards{width:100%;max-width:1120px;margin:0 auto;display:grid;grid-template-columns:1fr;gap:28px;align-items:end}
 @media(min-width:900px){.vg-cards{grid-template-columns:1fr 1fr;gap:40px}}
@@ -98,8 +98,9 @@ export const VOYAGE_CSS = `
 .vg-card h3{margin:0 0 14px;font-size:18px;line-height:1.3;font-weight:700}
 .vg-text{margin:0;font-size:clamp(.9375rem,1.25vw,1.125rem);line-height:1.5;font-weight:500}
 .vg-word{transition:color .15s}
-.vg-text[data-audio] .vg-word{color:rgba(255,255,255,.3)}
-.vg-text[data-audio] .vg-word.on{color:#fff}
+/* Words dim only while this chapter's narration is playing (cl-live, see lib/chapterLayout.ts): readable without sound. */
+.cl-live .vg-text[data-audio] .vg-word{color:rgba(255,255,255,.3)}
+.cl-live .vg-text[data-audio] .vg-word.on{color:#fff}
 .vg-quote{position:relative;margin:0;padding:34px 0 0}
 .vg-quote::before{content:"\\201C";position:absolute;left:-2px;top:-10px;font-family:var(--vg-display,"Unbounded",sans-serif);font-weight:800;font-size:64px;line-height:1;color:var(--vg-accent)}
 .vg-quote p{margin:0;font-size:18px;line-height:1.45;font-weight:700;letter-spacing:-.005em}
@@ -142,5 +143,5 @@ export const VOYAGE_CSS = `
 @media(orientation:portrait){.vg-planet{--pw:min(190vw,1500px);bottom:calc(var(--pw) * -.5)}}
 @media(max-width:1099px){.vg-nav{bottom:76px}.vg-segs{bottom:calc(76px + 78px)}}
 @media(max-width:560px){.vg-card-body{padding:94px 22px 70px}.vg-nav-row button{font-size:12px}.vg-select-card{top:44%}}
-@media(prefers-reduced-motion:reduce){.vg-marquee-inner,.vg-planet img,.vg-rocks,.vg-art-prop img,.vg-video video,.vg-video img,.vg-sky-twinkle{animation:none}}
+@media(prefers-reduced-motion:reduce){.vg-marquee-inner,.vg-planet img,.vg-rocks,.vg-art-prop img,.vg-video video,.vg-video img,.vg-sky-twinkle{animation:none}.vg-sky,.vg-planet,.vg-planet img,.vg-word,.vg-btn,.vg-music{transition:none}}
 `;

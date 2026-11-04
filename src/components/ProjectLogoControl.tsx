@@ -93,6 +93,8 @@ export default function ProjectLogoControl({ projectId, logoUrl, onChanged }: Pr
   }
 
   async function remove() {
+    // Removing is immediate and saved, so ask first (UX-17).
+    if (!window.confirm("Remove the company logo from this story? It disappears from the site the next time you publish.")) return;
     setError(null);
     setBusy(true);
     try {
@@ -109,7 +111,6 @@ export default function ProjectLogoControl({ projectId, logoUrl, onChanged }: Pr
 
   return (
     <div>
-      <p className="mb-3 text-lg font-medium text-neutral-700 dark:text-indigo-100">Company logo</p>
       <div className="flex flex-wrap items-center gap-4">
         {logoUrl && (
           <div className="flex h-20 w-32 items-center justify-center overflow-hidden rounded-xl border border-neutral-200 bg-white p-2 dark:border-white/10 dark:bg-white/90">
@@ -122,10 +123,12 @@ export default function ProjectLogoControl({ projectId, logoUrl, onChanged }: Pr
           type="file"
           accept={LOGO_ACCEPT}
           className="hidden"
+          tabIndex={-1}
+          aria-hidden="true"
           onChange={(e) => void replace(e.target.files?.[0])}
         />
         <button type="button" disabled={busy} onClick={() => inputRef.current?.click()} className={logoButtonClass}>
-          {busy ? "Working..." : logoUrl ? "Replace logo" : "Add logo"}
+          {busy ? "Saving…" : logoUrl ? "Replace logo" : "Add logo"}
         </button>
         {logoUrl && !busy && (
           <button type="button" onClick={() => void remove()} className={logoButtonClass}>
@@ -134,7 +137,7 @@ export default function ProjectLogoControl({ projectId, logoUrl, onChanged }: Pr
         )}
       </div>
       {error && (
-        <p role="alert" className="mt-2 text-base text-red-600 dark:text-red-300">
+        <p role="alert" className="mt-2 text-xs text-red-700 dark:text-red-300">
           {error}
         </p>
       )}

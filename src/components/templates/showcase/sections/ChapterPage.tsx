@@ -11,8 +11,12 @@ import { Header } from "./Header";
 /**
  * Chapter page template. One layout, filled from a `ShowcaseChapter`.
  *
- * A single vertical column (desktop and mobile alike): title and tags, the
- * pictures, the narration text, then the Next pill and chapter links. The page
+ * Desktop (>= 900px): two columns, a zigzag like the shared chapter layout
+ * (chapterTextSide in lib/chapterLayout.ts). Chapter 1 has its title, narration
+ * and links on the left (sticky while the pictures scroll past on the right),
+ * chapter 2 the other way round, and so on. Phones: a single column with the
+ * title and tags, the pictures, the narration text, then the Next pill and
+ * chapter links. The page
  * scrolls normally; each picture gets its own scroll effect (zoom, tilt, reveal,
  * inner slide, rise) from its position in the viewport, and the text blocks rise
  * into place from below as they come into view.
@@ -101,10 +105,10 @@ function titleSizes(title: string): { lg: string; sm: string } {
   return { lg: "2.2vw", sm: "6.5vw" };
 }
 
-/** Desktop width of a gallery figure: wide pictures fill most of the column, portrait ones are narrower; never taller than ~82vh. */
+/** Desktop width of a gallery figure: the full picture column, but never taller than ~82vh. */
 function figureWidth(item: ShowcaseMediaItem): string {
   const ratio = item.width / item.height;
-  return `min(${ratio >= 1 ? "var(--pd-col)" : "42vw"}, ${(82 * ratio).toFixed(1)}vh)`;
+  return `min(100%, ${(82 * ratio).toFixed(1)}vh)`;
 }
 
 /** Splits a paragraph into word spans the audio can light up. */
@@ -134,6 +138,7 @@ export function ChapterPage({ chapter }: { chapter: ShowcaseChapter }) {
   const audioRef = useRef<HTMLAudioElement>(null);
   const textRef = useRef<HTMLDivElement>(null);
   const mainRef = useRef<HTMLElement>(null);
+  const panelRef = useRef<HTMLDivElement>(null);
   const [leaving, setLeaving] = useState(false);
 
   // Coming from a tile: hide the main picture until the transition lands on it.
@@ -178,6 +183,12 @@ export function ChapterPage({ chapter }: { chapter: ShowcaseChapter }) {
       setLeaving(true);
       advanceTimer = window.setTimeout(() => router.push(next.href), 650);
     };
+    // The words dim only while this chapter's narration is audible (sc-live).
+    const onLive = () => text.classList.add("sc-live");
+    const onQuiet = () => text.classList.remove("sc-live");
+    audio.addEventListener("play", onLive);
+    audio.addEventListener("pause", onQuiet);
+    audio.addEventListener("ended", onQuiet);
     const play = () => {
       audio.play().catch((error: unknown) => {
         // Autoplay can be blocked before the first click; the dock then shows "Play".
@@ -200,9 +211,32 @@ export function ChapterPage({ chapter }: { chapter: ShowcaseChapter }) {
       unsubscribe();
       audio.removeEventListener("timeupdate", onTimeUpdate);
       audio.removeEventListener("ended", onEnded);
+      audio.removeEventListener("play", onLive);
+      audio.removeEventListener("pause", onQuiet);
+      audio.removeEventListener("ended", onQuiet);
       audio.pause();
+      text.classList.remove("sc-live");
     };
   }, [chapter.audioUrl, chapter.slug, next, router]);
+
+  // The text column stays in view (sticky) beside the pictures on desktop, unless it
+  // is taller than the window, where sticking would hide its end.
+  useEffect(() => {
+    const panel = panelRef.current;
+    if (!panel) return;
+    const check = (): void => {
+      const top = parseFloat(getComputedStyle(panel).top) || 0;
+      panel.classList.toggle("pd-tall", panel.offsetHeight > window.innerHeight - top - 24);
+    };
+    check();
+    const ro = new ResizeObserver(check);
+    ro.observe(panel);
+    window.addEventListener("resize", check);
+    return () => {
+      ro.disconnect();
+      window.removeEventListener("resize", check);
+    };
+  }, [chapter.slug]);
 
   // Scroll effects. The page scrolls normally; each picture gets its own effect from
   // where it sits in the viewport (t: -1 above centre ... +1 below), applied with one
@@ -362,6 +396,8 @@ export function ChapterPage({ chapter }: { chapter: ShowcaseChapter }) {
 
   const { theme } = chapter;
   const sizes = titleSizes(chapter.title);
+  // Zigzag on desktop: even chapters (1st, 3rd, ...) on the left, odd on the right.
+  const textRight = chapter.index % 2 === 1;
   const rootStyle = {
     background: theme.bg,
     color: theme.text,
@@ -372,9 +408,9 @@ export function ChapterPage({ chapter }: { chapter: ShowcaseChapter }) {
     "--pd-text": theme.text,
     "--pd-btn-bg": theme.btnBg,
     "--pd-btn-text": theme.btnText,
-    "--pd-title": sizes.lg,
+    // the title sits in the text column on desktop, so it is scaled down from the full-width size
+    "--pd-title": `calc(${sizes.lg} * 0.7)`,
     "--pd-title-m": sizes.sm,
-    "--pd-col": "min(76vw, 1200px)",
   } as CSSProperties;
 
   return (
@@ -401,101 +437,105 @@ export function ChapterPage({ chapter }: { chapter: ShowcaseChapter }) {
 
       <div
         ref={columnRef}
-        className="relative mx-auto flex flex-col items-center gap-[10vw] px-[var(--sc-pad-x)] pb-[12vw] pt-[26vw] lg:gap-[11vh] lg:pb-[16vh] lg:pt-[19vh]"
+        className="relative mx-auto px-[var(--sc-pad-x)] pb-[12vw] pt-[26vw] min-[900px]:pb-[16vh] min-[900px]:pt-[19vh]"
       >
-        <section className="pd-fx w-full lg:w-[var(--pd-col)]" style={{ "--pd-d": "0.1s" } as CSSProperties}>
-          <h1 className="m-0 text-[length:var(--pd-title-m)] font-medium leading-[0.95] tracking-[-0.02em] lg:max-w-[60vw] lg:text-[length:var(--pd-title)]">
-            {chapter.title}
-          </h1>
-          <p
-            className="mt-[1.5em] text-[0.75rem] uppercase leading-[1.3] lg:text-[0.8vw]"
-            style={{ color: "var(--pd-highlight)" }}
-          >
-            {chapter.tags.join(" • ")}
-          </p>
-        </section>
-
-        {chapter.items.map((item, i) => (
-          <figure
-            key={i}
-            ref={i === 0 ? mainRef : undefined}
-            className={`m-0 w-full shrink-0 overflow-hidden rounded-[15px] lg:w-[var(--pd-w)] ${i > 0 ? "pd-fade" : ""}`}
-            style={
-              {
-                aspectRatio: `${item.width} / ${item.height}`,
-                "--pd-d": `${0.15 + i * 0.12}s`,
-                "--pd-w": figureWidth(item),
-              } as CSSProperties
-            }
-          >
-            <Media item={item} picture={i === 0 ? chapterPicture(chapter) : mediaItemPicture(item)} priority={i < 2} />
-          </figure>
-        ))}
-
-        <section className="flex w-full flex-col lg:w-[min(var(--pd-col),46rem)]">
-          <div
-            ref={textRef}
-            className="sc-rise sc-text max-w-[30em] text-[4.2vw] leading-[1.5] lg:max-w-none lg:text-[1.2vw] lg:leading-[1.55]"
-            data-audio={chapter.audioUrl ? "" : undefined}
-          >
-            {chapter.paragraphs.map((p, i) => (
-              <p key={i} className={i === 0 ? "m-0" : "mt-[1em]"}>
-                {chapter.audioUrl ? <Words text={p} /> : p}
-              </p>
+        {/* Zigzag (>= 900px): the pictures on one side, the title, narration and links on
+            the other, swapping sides each chapter (showcaseCss .pd-split). Phones keep the
+            single column: title, pictures, then the text. */}
+        <div className={`pd-split ${textRight ? "pd-text-right" : "pd-text-left"}`}>
+          <div className="pd-media">
+            {chapter.items.map((item, i) => (
+              <figure
+                key={i}
+                ref={i === 0 ? mainRef : undefined}
+                className={`m-0 w-full shrink-0 overflow-hidden rounded-[15px] ${i > 0 ? "pd-fade" : ""}`}
+                style={
+                  {
+                    aspectRatio: `${item.width} / ${item.height}`,
+                    "--pd-d": `${0.15 + i * 0.12}s`,
+                    "--pd-w": figureWidth(item),
+                  } as CSSProperties
+                }
+              >
+                <Media item={item} picture={i === 0 ? chapterPicture(chapter) : mediaItemPicture(item)} priority={i < 2} />
+              </figure>
             ))}
-            {chapter.audioUrl && <audio ref={audioRef} src={chapter.audioUrl} preload="none" />}
           </div>
 
-          <a
-            href={next ? next.href : "#/"}
-            className="sc-rise group relative mt-[3em] flex h-[3.375em] w-fit items-center gap-[1.1em] overflow-hidden rounded-full pl-[1.1em] pr-[1.5em] text-[0.875rem] font-medium uppercase no-underline"
-            style={{ background: "var(--pd-btn-bg)", color: "var(--pd-btn-text)" }}
-          >
-            <span
-              aria-hidden="true"
-              className="z-[1] block h-[0.5em] w-[0.5em] rounded-full transition-transform duration-[400ms] ease-[cubic-bezier(.35,0,0,1)] group-hover:translate-x-[5em] group-hover:scale-[26]"
-              style={{ background: "var(--pd-btn-text)" }}
-            />
-            <span className="relative z-[2] transition-colors duration-500 group-hover:[color:var(--pd-text)]">
-              {next ? "Next chapter" : "All chapters"}
-            </span>
-          </a>
+          <div ref={panelRef} className="pd-panel">
+            <section className="pd-fx pd-head" style={{ "--pd-d": "0.1s" } as CSSProperties}>
+              <h1 className="pd-title m-0 font-medium leading-[0.95] tracking-[-0.02em]">{chapter.title}</h1>
+              <p className="pd-tags mt-[1.5em] uppercase leading-[1.3]" style={{ color: "var(--pd-highlight)" }}>
+                {chapter.tags.join(" • ")}
+              </p>
+            </section>
 
-          <div className="sc-rise mt-[4em] grid grid-cols-2 gap-[4vw] text-[4vw] leading-[1.4] lg:gap-[2vw] lg:text-[1vw]">
-            <div>
-              <h4 className="m-0 mb-[1em] text-[0.8em] font-normal uppercase" style={{ color: "var(--pd-highlight)" }}>
-                Chapter
-              </h4>
-              <div>
-                {chapter.index + 1} of {total}
+            <section className="pd-body flex w-full flex-col">
+              <div
+                ref={textRef}
+                className="sc-rise sc-text max-w-[30em] text-[4.2vw] leading-[1.5] min-[900px]:max-w-none min-[900px]:text-[clamp(15px,1.2vw,18px)] min-[900px]:leading-[1.55]"
+                data-audio={chapter.audioUrl ? "" : undefined}
+              >
+                {chapter.paragraphs.map((p, i) => (
+                  <p key={i} className={i === 0 ? "m-0" : "mt-[1em]"}>
+                    {chapter.audioUrl ? <Words text={p} /> : p}
+                  </p>
+                ))}
+                {chapter.audioUrl && <audio ref={audioRef} src={chapter.audioUrl} preload="none" />}
               </div>
-            </div>
-            <div>
-              <h4 className="m-0 mb-[1em] text-[0.8em] font-normal uppercase" style={{ color: "var(--pd-highlight)" }}>
-                Navigate
-              </h4>
-              {prev && (
+
+              <a
+                href={next ? next.href : "#/"}
+                className="sc-rise group relative mt-[3em] flex h-[3.375em] w-fit items-center gap-[1.1em] overflow-hidden rounded-full pl-[1.1em] pr-[1.5em] text-[0.875rem] font-medium uppercase no-underline"
+                style={{ background: "var(--pd-btn-bg)", color: "var(--pd-btn-text)" }}
+              >
+                <span
+                  aria-hidden="true"
+                  className="z-[1] block h-[0.5em] w-[0.5em] rounded-full transition-transform duration-[400ms] ease-[cubic-bezier(.35,0,0,1)] group-hover:translate-x-[5em] group-hover:scale-[26]"
+                  style={{ background: "var(--pd-btn-text)" }}
+                />
+                <span className="relative z-[2] transition-colors duration-500 group-hover:[color:var(--pd-text)]">
+                  {next ? "Next chapter" : "All chapters"}
+                </span>
+              </a>
+
+              <div className="sc-rise mt-[4em] grid grid-cols-2 gap-[4vw] text-[4vw] leading-[1.4] min-[900px]:gap-[2vw] min-[900px]:text-[clamp(13px,1vw,15px)]">
                 <div>
-                  <a href={prev.href} className="underline-offset-4 hover:underline">
-                    Previous: {prev.title}
-                  </a>
+                  <h4 className="m-0 mb-[1em] text-[0.8em] font-normal uppercase" style={{ color: "var(--pd-highlight)" }}>
+                    Chapter
+                  </h4>
+                  <div>
+                    {chapter.index + 1} of {total}
+                  </div>
                 </div>
-              )}
-              {next && (
                 <div>
-                  <a href={next.href} className="underline-offset-4 hover:underline">
-                    Next: {next.title}
-                  </a>
+                  <h4 className="m-0 mb-[1em] text-[0.8em] font-normal uppercase" style={{ color: "var(--pd-highlight)" }}>
+                    Navigate
+                  </h4>
+                  {prev && (
+                    <div>
+                      <a href={prev.href} className="underline-offset-4 hover:underline">
+                        Previous: {prev.title}
+                      </a>
+                    </div>
+                  )}
+                  {next && (
+                    <div>
+                      <a href={next.href} className="underline-offset-4 hover:underline">
+                        Next: {next.title}
+                      </a>
+                    </div>
+                  )}
+                  <div>
+                    <a href="#/" className="underline-offset-4 hover:underline">
+                      All chapters
+                    </a>
+                  </div>
                 </div>
-              )}
-              <div>
-                <a href="#/" className="underline-offset-4 hover:underline">
-                  All chapters
-                </a>
               </div>
-            </div>
+            </section>
           </div>
-        </section>
+        </div>
       </div>
     </div>
   );

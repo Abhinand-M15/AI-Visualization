@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
-import { requireUser, unauthorizedResponse } from "@/lib/auth/session";
+import { apiErrorResponse } from "@/lib/server/errors";
+import { requireUser } from "@/lib/auth/session";
 import { getImageProviderFor, isImageProvider, setImageProviderFor } from "@/lib/userKeys";
 import { logActivity } from "@/lib/activity";
 
@@ -9,10 +10,7 @@ import { logActivity } from "@/lib/activity";
  */
 
 function errorResponse(error: unknown, label: string) {
-  const unauthorized = unauthorizedResponse(error);
-  if (unauthorized) return unauthorized;
-  console.error(`${label} failed:`, error instanceof Error ? error.message : error);
-  return NextResponse.json({ error: error instanceof Error ? error.message : "Unexpected error" }, { status: 500 });
+  return apiErrorResponse(error, label);
 }
 
 export async function GET() {

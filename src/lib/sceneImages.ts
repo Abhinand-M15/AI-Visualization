@@ -6,6 +6,7 @@
  * column yields "none" (empty rows / no fields), never an exception.
  */
 import { getSupabase } from "@/lib/db";
+import { isValidChunkId, isValidProjectId, storagePath, UnsafePathError } from "@/lib/server/ids";
 import { cloudflareConfigured } from "@/lib/imageGen/cloudflare";
 import { logoUrl, SCENE_IMAGES_BUCKET, sceneImageUrl } from "@/lib/storageUrls";
 import type { AppUser } from "@/lib/auth/session";
@@ -65,9 +66,13 @@ export function mimeForPath(path: string): string {
   return "image/png";
 }
 
-/** Storage path of a chapter image inside the scene-images bucket. */
+/**
+ * Storage path of a chapter image inside the scene-images bucket. Throws for any id that is
+ * not a plain project / chunk id, so a crafted id can never reach another folder (SEC-03).
+ */
 export function sceneImagePath(projectId: string, chunkId: string, mimeType: string): string {
-  return `${projectId}/${chunkId}.${extensionForMime(mimeType)}`;
+  if (!isValidProjectId(projectId) || !isValidChunkId(chunkId)) throw new UnsafePathError();
+  return storagePath(projectId, `${chunkId}.${extensionForMime(mimeType)}`);
 }
 
 /** All chapter_images rows of a project. [] when the table is missing or unreadable. */

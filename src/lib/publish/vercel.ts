@@ -31,12 +31,23 @@ export interface DeployOptions {
 
 const API = "https://api.vercel.com";
 
+/**
+ * Story sites are published with VERCEL_PUBLISH_TOKEN (+ VERCEL_PUBLISH_TEAM_ID) when set:
+ * a token for a separate Vercel account or team that holds nothing but story sites (SEC-13).
+ * Falls back to VERCEL_TOKEN / VERCEL_TEAM_ID, the old single-token setup.
+ */
+export function publishTokenConfigured(): boolean {
+  return Boolean(process.env.VERCEL_PUBLISH_TOKEN || process.env.VERCEL_TOKEN);
+}
+
 function getConfig() {
-  const token = process.env.VERCEL_TOKEN;
+  const dedicated = process.env.VERCEL_PUBLISH_TOKEN;
+  const token = dedicated || process.env.VERCEL_TOKEN;
   if (!token) {
-    throw new Error("VERCEL_TOKEN is not set. Add it to .env.local (see .env.local.example).");
+    // Never shown to users (the publish route checks publishTokenConfigured() first).
+    throw new Error("Publishing to Vercel is not configured on this server.");
   }
-  return { token, teamId: process.env.VERCEL_TEAM_ID };
+  return { token, teamId: dedicated ? process.env.VERCEL_PUBLISH_TEAM_ID : process.env.VERCEL_TEAM_ID };
 }
 
 function withTeam(url: string, teamId?: string) {
@@ -49,11 +60,33 @@ function withTeam(url: string, teamId?: string) {
 // ---------------------------------------------------------------------------
 
 /**
+ * Content-Security-Policy of every published story site (SEC-08, SEC-14). The renderers
+ * (staticSite.ts, voyageSite.ts, showcaseSite.ts) emit inline scripts and load GSAP / three.js
+ * from cdnjs and jsdelivr, Voyage's fonts from Google Fonts, the Lunar HDR from raw.githack.com
+ * and the Airlock hero assets from jsdelivr. Narration, images and the logo are bundled with the
+ * site; Supabase stays allowed for media only, as a fallback for an image that could not be bundled.
+ * No plugins, no <base>, no forms, no framing by other origins.
+ */
+export const SITE_CONTENT_SECURITY_POLICY = [
+  "default-src 'self'",
+  "script-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com https://cdn.jsdelivr.net",
+  "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
+  "font-src 'self' data: https://fonts.gstatic.com",
+  "img-src 'self' data: blob: https://*.supabase.co https://cdn.jsdelivr.net https://raw.githack.com",
+  "media-src 'self' data: blob: https://*.supabase.co",
+  "connect-src 'self' https://cdn.jsdelivr.net https://raw.githack.com https://*.supabase.co",
+  "worker-src 'self' blob:",
+  "object-src 'none'",
+  "base-uri 'none'",
+  "form-action 'none'",
+  "frame-ancestors 'self'",
+  "upgrade-insecure-requests",
+].join("; ");
+
+/**
  * Vercel reads vercel.json from the uploaded files of a file-based
  * deployment. Published sites must never be indexed and must not be
- * frameable by other origins. No Content-Security-Policy: templates pull
- * scripts/fonts from CDNs and audio from Supabase, and a wrong CSP would
- * silently break playback.
+ * frameable by other origins.
  */
 const SITE_VERCEL_JSON = {
   cleanUrls: true,
@@ -65,6 +98,7 @@ const SITE_VERCEL_JSON = {
         { key: "X-Robots-Tag", value: "noindex, nofollow" },
         { key: "X-Content-Type-Options", value: "nosniff" },
         { key: "X-Frame-Options", value: "SAMEORIGIN" },
+        { key: "Content-Security-Policy", value: SITE_CONTENT_SECURITY_POLICY },
         { key: "Referrer-Policy", value: "strict-origin-when-cross-origin" },
         { key: "Permissions-Policy", value: "camera=(), microphone=(), geolocation=(), payment=(), usb=()" },
         { key: "Strict-Transport-Security", value: "max-age=63072000; includeSubDomains" },
@@ -131,22 +165,45 @@ async function uploadFile(file: DeployFile, token: string, teamId?: string) {
   const buffer = file.encoding === "base64" ? Buffer.from(file.data, "base64") : Buffer.from(file.data, "utf-8");
   const sha = createHash("sha1").update(buffer).digest("hex");
 
-  const res = await fetch(withTeam(`${API}/v2/files`, teamId), {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${token}`,
-      "Content-Type": "application/octet-stream",
-      "Content-Length": String(buffer.length),
-      "x-vercel-digest": sha,
-    },
-    body: new Uint8Array(buffer),
-  });
-  if (!res.ok) {
-    const body = (await res.json().catch(() => ({}))) as { error?: { message: string } };
-    throw new Error(`Vercel file upload failed for ${file.file}: ${body.error?.message ?? res.statusText}`);
+  // A few tries with a timeout each (AR-12): one slow or dropped upload must not hang the publish.
+  let lastError: unknown;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const res = await fetch(withTeam(`${API}/v2/files`, teamId), {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/octet-stream",
+          "Content-Length": String(buffer.length),
+          "x-vercel-digest": sha,
+        },
+        body: new Uint8Array(buffer),
+        signal: AbortSignal.timeout(60_000),
+      });
+      if (res.ok) return { file: file.file, sha, size: buffer.length };
+      const body = (await res.json().catch(() => ({}))) as { error?: { message: string } };
+      lastError = new Error(`Vercel file upload failed for ${file.file} (HTTP ${res.status}): ${body.error?.message ?? res.statusText}`);
+      if (res.status < 500 && res.status !== 429) break;
+    } catch (error) {
+      lastError = error;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 1000 * 2 ** attempt));
   }
+  throw lastError;
+}
 
-  return { file: file.file, sha, size: buffer.length };
+/** Runs `task` over `items` with at most `limit` in flight, keeping order. */
+async function mapLimited<T, R>(items: T[], limit: number, task: (item: T) => Promise<R>): Promise<R[]> {
+  const results: R[] = new Array(items.length);
+  let cursor = 0;
+  const workers = Array.from({ length: Math.max(1, Math.min(limit, items.length)) }, async () => {
+    while (cursor < items.length) {
+      const index = cursor++;
+      results[index] = await task(items[index]);
+    }
+  });
+  await Promise.all(workers);
+  return results;
 }
 
 /**
@@ -199,7 +256,7 @@ export async function deployToVercelDetailed(
 ): Promise<DeployResult> {
   const { token, teamId } = getConfig();
 
-  const uploaded = await Promise.all(withSiteHardeningFiles(files).map((file) => uploadFile(file, token, teamId)));
+  const uploaded = await mapLimited(withSiteHardeningFiles(files), 6, (file) => uploadFile(file, token, teamId));
 
   const createRes = await fetch(withTeam(`${API}/v13/deployments`, teamId), {
     method: "POST",
@@ -282,6 +339,23 @@ export interface VercelProjectInfo {
   name: string;
   framework: string | null;
   hasGitLink: boolean;
+}
+
+/**
+ * DELETE /v9/projects/{name}: takes a published story site down (UX-18, SEC-18). Callers must
+ * first confirm the name belongs to the project being deleted (site_names / publications).
+ * True when deleted or already gone.
+ */
+export async function deleteVercelProject(name: string): Promise<boolean> {
+  const { token, teamId } = getConfig();
+  const res = await fetch(withTeam(`${API}/v9/projects/${encodeURIComponent(name)}`, teamId), {
+    method: "DELETE",
+    headers: { Authorization: `Bearer ${token}` },
+    signal: AbortSignal.timeout(20_000),
+  });
+  if (res.status === 404) return true;
+  if (!res.ok) throw new Error(`Vercel project delete failed (${res.status}).`);
+  return true;
 }
 
 /** GET /v9/projects/{name}: the project with that name on our account/team, or null (404). */

@@ -1,7 +1,10 @@
 import { getSupabase } from "@/lib/db";
 import { PROJECT_SELECT_COLUMNS, rowToProject, type ProjectRow } from "@/lib/projects";
-import { requireUser, unauthorizedResponse, type AppUser } from "@/lib/auth/session";
-import { getGeminiKeyFor, missingApiKeyResponse } from "@/lib/userKeys";
+import { requireUser, type AppUser } from "@/lib/auth/session";
+import { getGeminiKeyFor } from "@/lib/userKeys";
+import { apiErrorResponse, HttpError, toProviderError, type ProviderName } from "@/lib/server/errors";
+import { isValidChunkId, isValidProjectId } from "@/lib/server/ids";
+import { consumeQuota, QuotaExceededError, type QuotaResult } from "@/lib/server/quota";
 import { logActivity } from "@/lib/activity";
 import { fillPrompt, getDomain, getPrompt } from "@/lib/domains";
 import { getImageGeneratorFor, type ImageGenerator } from "@/lib/imageGen/types";
@@ -70,8 +73,33 @@ function errorJson(error: string, code: string, status: number) {
   return Response.json({ error, code }, { status });
 }
 
-function messageOf(error: unknown): string {
-  return (error instanceof Error ? error.message : String(error)).slice(0, 500);
+/**
+ * The text saved in chapter_images.error, which the panel shows to the user: plain language,
+ * never a provider payload (UX-06, UX-14). The full error goes to the server log.
+ */
+function messageOf(error: unknown, provider = "gemini"): string {
+  if (error instanceof LeadSetupError || error instanceof HttpError) return error.message.slice(0, 500);
+  const name: ProviderName = provider === "cloudflare" ? "cloudflare" : provider === "openai" ? "openai" : "gemini";
+  return toProviderError(error, name).message.slice(0, 500);
+}
+
+/**
+ * Per-user daily image allowance (SEC-11, AR-03): checked before each unit of work.
+ * Returns false (and remembers why) once the user's allowance is used up.
+ */
+function createImageQuota(user: AppUser | null) {
+  let exceeded: QuotaResult | null = null;
+  return {
+    async take(count: number): Promise<boolean> {
+      if (exceeded) return false;
+      const result = await consumeQuota(user, "image", count);
+      if (!result.allowed) exceeded = result;
+      return result.allowed;
+    },
+    get exceeded() {
+      return exceeded;
+    },
+  };
 }
 
 type Supa = ReturnType<typeof getSupabase>;
@@ -201,6 +229,8 @@ async function generateLeadScenes(args: {
     const claim = (chunkId: string) => claimChapter(supabase, id, provider, chunkId);
     const finish = (chunkId: string, patch: Record<string, unknown>) => finishChapter(supabase, id, chunkId, patch);
     const skipped: string[] = [];
+    const quota = createImageQuota(user);
+    let quotaSkipped = 0;
     let sheets = 0;
     let lowConfidenceSheets = 0;
 
@@ -248,7 +278,7 @@ async function generateLeadScenes(args: {
           status: "failed",
           ...(brief && prompt ? { prompt_used: encodeBrief(brief, prompt) } : {}),
           provider,
-          error: messageOf(error),
+          error: messageOf(error, provider),
         });
         return { chunkId: chunk.id, status: "failed" };
       }
@@ -257,6 +287,10 @@ async function generateLeadScenes(args: {
     const { results: unitResults } = await runWithinBudget(
       batches,
       async (batch): Promise<{ chunkId: string; status: ChapterImageStatus }[]> => {
+        if (!(await quota.take(batch.length))) {
+          quotaSkipped += batch.length;
+          return [];
+        }
         if (!sheetPrompts || batch.length !== SHEET_SIZE) {
           const out = [];
           for (const chunk of batch) out.push(await runSingle(chunk, false));
@@ -292,7 +326,8 @@ async function generateLeadScenes(args: {
       { budgetMs: BUDGET_MS }
     );
     const results = unitResults.flat();
-    const remaining = batches.slice(unitResults.length).reduce((sum, batch) => sum + batch.length, 0);
+    const remaining = batches.slice(unitResults.length).reduce((sum, batch) => sum + batch.length, 0) + quotaSkipped;
+    if (quota.exceeded && results.length === 0) throw new QuotaExceededError("image", quota.exceeded.used, quota.exceeded.limit);
 
     const reported = results.filter((result) => !skipped.includes(result.chunkId));
     await logActivity(user, id, body.chunkId ? "image.regenerated" : "images.generated", {
@@ -305,7 +340,12 @@ async function generateLeadScenes(args: {
       failed: reported.filter((r) => r.status === "failed").length,
     });
     const busy = inProgress.length + skipped.length;
-    return Response.json({ results: reported, remaining, ...(busy > 0 ? { inProgress: busy } : {}) });
+    return Response.json({
+      results: reported,
+      remaining,
+      ...(busy > 0 ? { inProgress: busy } : {}),
+      ...(quota.exceeded ? { quotaExceeded: true } : {}),
+    });
   } catch (error) {
     if (error instanceof LeadSetupError) return errorJson(error.message, error.code, error.status);
     throw error;
@@ -317,18 +357,17 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
   try {
     user = await requireUser();
   } catch (error) {
-    const unauthorized = unauthorizedResponse(error);
-    if (unauthorized) return unauthorized;
-    throw error;
+    return apiErrorResponse(error, "generate scene images");
   }
 
   try {
     const { id } = await context.params;
+    if (!isValidProjectId(id)) return errorJson("Project not found.", "not_found", 404);
     const raw = ((await request.json().catch(() => null)) ?? {}) as Record<string, unknown>;
     const body: Body = {
       onlyMissing: raw.onlyMissing === true,
       retryFailed: raw.retryFailed === true,
-      chunkId: typeof raw.chunkId === "string" && raw.chunkId ? raw.chunkId : undefined,
+      chunkId: isValidChunkId(raw.chunkId) ? raw.chunkId : undefined,
       mode: raw.mode === "lead" || raw.mode === "avatar" ? raw.mode : undefined,
     };
 
@@ -422,9 +461,15 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
     const finish = (chunkId: string, patch: Record<string, unknown>) => finishChapter(supabase, id, chunkId, patch);
 
     const skipped: string[] = [];
+    const quotaSkippedIds: string[] = [];
+    const quota = createImageQuota(user);
     const { results, remaining } = await runWithinBudget(
       targets,
       async (chunk): Promise<{ chunkId: string; status: ChapterImageStatus }> => {
+        if (!(await quota.take(1))) {
+          quotaSkippedIds.push(chunk.id);
+          return { chunkId: chunk.id, status: "pending" };
+        }
         if (!(await claim(chunk.id))) {
           skipped.push(chunk.id);
           return { chunkId: chunk.id, status: "pending" };
@@ -450,7 +495,7 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
         } catch (error) {
           // The chapter keeps no image (templates fall back to the avatar) and can be retried.
           console.error(`generate-scene-images: chapter ${chunk.id} failed:`, error);
-          await finish(chunk.id, { status: "failed", prompt_used: prompt, provider, error: messageOf(error) });
+          await finish(chunk.id, { status: "failed", prompt_used: prompt, provider, error: messageOf(error, provider) });
           return { chunkId: chunk.id, status: "failed" };
         }
       },
@@ -458,7 +503,8 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
     );
 
     // Chapters another run was already generating are not ours to wait for.
-    const reported = results.filter((result) => !skipped.includes(result.chunkId));
+    const reported = results.filter((result) => !skipped.includes(result.chunkId) && !quotaSkippedIds.includes(result.chunkId));
+    if (quota.exceeded && reported.length === 0) throw new QuotaExceededError("image", quota.exceeded.used, quota.exceeded.limit);
     await logActivity(user, id, body.chunkId ? "image.regenerated" : "images.generated", {
       chunkId: body.chunkId,
       requested: targets.length,
@@ -466,16 +512,16 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
       failed: reported.filter((r) => r.status === "failed").length,
     });
     const busy = inProgress.length + skipped.length;
-    return Response.json({ results: reported, remaining, ...(busy > 0 ? { inProgress: busy } : {}) });
+    return Response.json({
+      results: reported,
+      remaining: remaining + quotaSkippedIds.length,
+      ...(busy > 0 ? { inProgress: busy } : {}),
+      ...(quota.exceeded ? { quotaExceeded: true } : {}),
+    });
   } catch (error) {
-    const unauthorized = unauthorizedResponse(error);
-    if (unauthorized) return unauthorized;
-    const missingKey = missingApiKeyResponse(error);
-    if (missingKey) return missingKey;
     if (isNotMigratedError(error as { message?: string })) {
-      return errorJson("Scene images need the domains migration (003), which has not been applied yet.", "not_migrated", 400);
+      return errorJson("Scene images aren't set up on this server yet. Ask your admin.", "not_migrated", 400);
     }
-    console.error("generate scene images failed:", error);
-    return errorJson(error instanceof Error ? error.message : "Unexpected error", "failed", 500);
+    return apiErrorResponse(error, "generate scene images");
   }
 }

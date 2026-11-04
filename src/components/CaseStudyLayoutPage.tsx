@@ -31,7 +31,7 @@ function asText(value: unknown): string | null {
 export function CaseStudyLayoutPage({ title, slots }: CaseStudyLayoutPageProps) {
   if (!slots) {
     return (
-      <div className="mx-auto max-w-2xl px-6 py-24 text-center text-neutral-500">
+      <div className="mx-auto max-w-2xl px-6 py-24 text-center text-muted-foreground">
         <p>This case study could not be fit into the layout — the storyline or template contract was malformed.</p>
       </div>
     );

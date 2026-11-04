@@ -1,6 +1,6 @@
 "use client";
 
-import { Suspense, useEffect, useRef, useState } from "react";
+import { Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { Canvas, useFrame, useThree } from "@react-three/fiber";
 import { Bounds, Center, OrbitControls, useGLTF } from "@react-three/drei";
 import * as THREE from "three";
@@ -11,8 +11,7 @@ import { cn } from "@/lib/utils";
  *  Gently scales up on hover/drag as a hint that it's interactive. */
 function Model({ url, onHoverChange }: { url: string; onHoverChange: (hovered: boolean) => void }) {
   const { scene } = useGLTF(url);
-  const cloned = useRef<THREE.Object3D | null>(null);
-  if (!cloned.current) cloned.current = scene.clone();
+  const cloned = useMemo(() => scene.clone(), [scene]);
   const groupRef = useRef<THREE.Group>(null);
   const hoveredRef = useRef(false);
   // The canvas renders on demand (see AvatarCanvas), so the hover scale asks for
@@ -43,7 +42,7 @@ function Model({ url, onHoverChange }: { url: string; onHoverChange: (hovered: b
         onHoverChange(false);
       }}
     >
-      <primitive object={cloned.current} />
+      <primitive object={cloned} />
     </group>
   );
 }
@@ -123,15 +122,12 @@ function AvatarCanvas({ url }: { url: string }) {
 let activeAvatarSlot: symbol | null = null;
 
 function useAvatarSlot(wantsSlot: boolean): boolean {
-  const idRef = useRef<symbol | null>(null);
-  if (!idRef.current) idRef.current = Symbol("avatar-slot");
-  const [hasSlot, setHasSlot] = useState(false);
+  const [id] = useState(() => Symbol("avatar-slot"));
+  const [holdsSlot, setHasSlot] = useState(false);
 
   useEffect(() => {
-    const id = idRef.current!;
     if (!wantsSlot) {
       if (activeAvatarSlot === id) activeAvatarSlot = null;
-      setHasSlot(false);
       return;
     }
     let cancelled = false;
@@ -146,15 +142,17 @@ function useAvatarSlot(wantsSlot: boolean): boolean {
         timeoutId = setTimeout(tryAcquire, 350);
       }
     }
-    tryAcquire();
+    // First attempt on the next tick (not synchronously inside the effect).
+    timeoutId = setTimeout(tryAcquire, 0);
     return () => {
       cancelled = true;
       clearTimeout(timeoutId);
       if (activeAvatarSlot === id) activeAvatarSlot = null;
     };
-  }, [wantsSlot]);
+  }, [wantsSlot, id]);
 
-  return hasSlot;
+  // Not wanting the slot means not holding it, whatever the last attempt said.
+  return wantsSlot && holdsSlot;
 }
 
 /**

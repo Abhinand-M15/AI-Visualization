@@ -75,7 +75,8 @@ This was tested on 13 Oct 2026 from a clean clone with no `.env.local`: install,
 Notes:
 - `npm run lint` shows about 13 old errors in untouched legacy files (`AudioPlayer`, `ThemeProvider`, `AvatarDisplay`, `avatar-3d`, `lunar-gravity-card`, `reactive-mouth-overlay`, `case-study-preview`). They predate this work and do not block the build. Do not chase them unless you are editing those files.
 - Do not run `npm run build` while `next dev` is running if you can avoid it: the build can briefly corrupt the dev server's generated type files (delete nothing, just restart the dev server).
-- With `AUTH_ENABLED` unset, the app runs with no sign-in and uses `GEMINI_API_KEY` from `.env.local`. The local app and the live app share the SAME Supabase database and storage, so local actions write real data. Do not experiment on the owner's real projects.
+- With `AUTH_ENABLED` unset, the app runs with no sign-in and uses `GEMINI_API_KEY` from `.env.local`. Since 04 Nov 2026, `npm run dev` binds to 127.0.0.1 and `scripts/check-dev-env.mjs` refuses to start when `.env.local` points at the production Supabase project with `AUTH_ENABLED` unset. Use a second free Supabase project for development (`docs/DEPLOYMENT.md` section 9), or `ALLOW_PROD_DB=1` for one session. In production the app refuses to run unless `AUTH_ENABLED=1`.
+- Tests: `npm test` (vitest). CI (`.github/workflows/ci.yml`) runs build, typecheck, lint, tests, `npm audit` and the Showcase bundle check.
 - Text-to-speech: leave `TTS_SERVER_URL` unset and set `TTS_PROVIDER=edge` to use the in-process Edge voices (no separate server). The old local setup used a custom edge-tts server on port 5050 (`TTS_SERVER_URL`, `TTS_API_KEY`); it is only needed with `TTS_PROVIDER=server`.
 - The "Showcase" template ships as a prebuilt bundle in `public/themes/showcase/`. After changing anything under `src/components/templates/showcase/`, `src/lib/showcase.ts` or `src/lib/showcaseCss.ts`, run `npm run build:showcase` and commit the rebuilt files, or published sites will not match the preview.
 
@@ -100,6 +101,9 @@ Notes:
 | `GEMINI_TEXT_MODEL`, `GEMINI_IMAGE_MODEL`, `OPENAI_IMAGE_MODEL`, `CLOUDFLARE_IMAGE_MODEL` | optional model overrides | model ids change often; override instead of editing code |
 | `DISABLED_TEMPLATES` | optional comma list of template ids to hide | `docs/REMOVING_TEMPLATES.md` |
 | `AUTH_PASSWORD_RESET` | `1` enables email password reset (needs email, which is not set up) | leave unset |
+| `SIGNUP_ALLOWED_EMAIL_DOMAINS`, `SIGNUP_ALLOWED_EMAILS` | who may sign up (comma lists). Both unset = sign-up closed. `AUTH_ENFORCE_ALLOWLIST=1` also blocks sign-in for existing accounts not on the list | owner decides |
+| `VERCEL_PUBLISH_TOKEN`, `VERCEL_PUBLISH_TEAM_ID` | optional separate account/token for published sites (falls back to `VERCEL_TOKEN`) | separate Vercel account |
+| `QUOTA_*` | per-user daily limits (publishes, new sites, images, TTS characters, generations, voice previews, key tests); `0` turns one off. Defaults in `src/lib/server/quota.ts` | leave unset for defaults |
 
 ---
 
@@ -114,11 +118,12 @@ Schema: `db/schema.sql` (base), then migrations in order. **All of 002 to 004 ar
 | `db/migrations/003_domains_images.sql` | `domains` (8 seeded industries), `domain_avatars`, `prompt_templates`, `chapter_images`, `projects.domain_id / domain_avatar_id / logo_path`, `profiles.image_provider`, buckets `scene-images` and `company-logos` | yes (07 Oct 2026) |
 | `db/migrations/004_lead_character_prompts.sql` | `domains.logo_placement`, domain outfits and logo spots, prompts `lead_character_rules`, `scene_director`, `lead_scene_image`, `lead_logo_instruction` | yes (08 Oct 2026) |
 | `db/migrations/005_lead_sheet_prompts.sql` | contact-sheet prompts `lead_sheet_rules`, `lead_sheet_director`, `lead_sheet_image`, `lead_sheet_logo`, plus `domains.outfit_sheet` | **NO, apply when the owner says** |
+| `db/migrations/006_security_hardening.sql` | audit fixes (04 Nov 2026): RLS on `system_prompts` / `agents` / `skills`, owner-only `projects` policies, bucket size and type limits, `usage_counters` quota table, permanent `site_names` table | **NO, apply when the owner says** (the code fails open on quotas until it is applied) |
 
-Apply one with a Supabase access token (Account, Access Tokens; revoke after):
+Apply one with a Supabase access token (Account, Access Tokens; revoke after). Production now needs `--prod`:
 
 ```bash
-SB_PAT=<token> node scripts/apply-migration.mjs db/migrations/005_lead_sheet_prompts.sql
+SB_PAT=<token> node scripts/apply-migration.mjs db/migrations/005_lead_sheet_prompts.sql --prod
 ```
 
 Notes: `projects.id` is TEXT (not uuid), so every `project_id` column is TEXT. 004 and 005 overwrite the stored prompts when re-run (edits made in the Supabase table editor are lost), so re-run only to reset. `prompt_templates` has row-level security on and no policies: only the server (service role) can read it. Existing projects created before accounts have no `owner_id`, so with `AUTH_ENABLED=1` they are hidden until assigned (see the comment at the top of 002).
@@ -224,6 +229,7 @@ VC_TOKEN=<vercel token> node scripts/deploy-studio.mjs
 ```
 
 Details:
+- Since 04 Nov 2026 the script deploys exactly the files of the committed HEAD, refuses a dirty tree (unless `--allow-dirty`), records the commit SHA, and reads production values from `.env.deploy.local` (falling back to `.env.local`). See `docs/DEPLOYMENT.md` section 10 for the checklist and the rollback to `9953fe6`.
 - `scripts/deploy-studio.mjs` sets `AUTH_ENABLED=1`, `TTS_PROVIDER=edge`, `APP_BASE_URL`, and copies the Supabase, encryption, Cloudflare and Drive values from `.env.local`. It stores the Vercel token itself as the app's `VERCEL_TOKEN` setting, **so do not revoke the token you deploy with**; the live app uses it to publish sites. If you revoke it, publishing breaks until you deploy with a new one.
 - Run `npx tsc --noEmit` and `npm run build` first. After a deploy, check `/login`, `/characters/lead.webp` and `/themes/showcase/showcase.js` return 200.
 - Published sites: the publish route builds the static bundle and creates or updates a Vercel project named `warpdrive-<name>`. Republishing reuses the name; the older `story-<id>` sites keep their address when you choose "Keep the current address".
@@ -268,6 +274,10 @@ The lead also did all integration, the migrations that were applied, every push 
 - **Where the previous assistant's own notes lived:** Claude Code's auto-memory on the old laptop (`C:\Users\Admin\.claude\projects\...\memory`). It does not travel with git. The important facts from it are all in this file; copy that folder across only if you want the raw notes.
 
 ---
+
+## 13a. Audit and fixes, 04 Nov 2026 (branch `fix/audit-04-nov-2026`, not merged or deployed)
+
+UI, UX, architecture and security audits are in `docs/audit/` (`00-summary.md` first). The branch fixes them and adds the owner's zigzag request: on every template every chapter alternates text and visual sides on desktop (chapters with no picture show a quote card on the visual side). Next 16.4.5 and sharp 0.35.5 close the critical advisories. Before deploying: apply migration 006, turn off public sign-up and set the password minimum to 8 in Supabase Auth, set `SIGNUP_ALLOWED_*`, rotate the tokens pasted into chat, and check in a browser that the new CSP does not block 3D previews, uploads or audio. Owner decisions still open: WarpDrive branding in case studies and the voice sample (UI-05 / D-011), who may sign up.
 
 ## 13. Status on 13 Oct 2026
 

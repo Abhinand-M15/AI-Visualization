@@ -5,6 +5,10 @@ import { createPortal } from "react-dom";
 import type { Project } from "@/lib/types";
 import { LoadingBar } from "@/components/LoadingBar";
 import { plural, summarizeNarration } from "@/lib/contentVersion";
+import { flattenCaseStudySections } from "@/lib/caseStudySections";
+import { Button, buttonClass } from "@/components/ui/button";
+import { ApiError, ensureOk, errorMessage, readJson, streamError } from "@/components/apiError";
+import { friendlyVoiceId } from "@/components/VoicePicker";
 import { TEMPLATE_UNAVAILABLE_NOTICE } from "@/lib/templates";
 import { useAvailableTemplates } from "@/lib/useAvailableTemplates";
 import { readNdjsonStream } from "@/lib/readNdjsonStream";
@@ -40,8 +44,13 @@ type CheckState =
 type Phase =
   | { kind: "edit" }
   | { kind: "narrating"; completed: number; total: number }
+  /** Some chapters still have no narration: publishing needs an explicit "publish without it" (UX-09). */
+  | { kind: "confirm-missing"; ids: string[]; reason: string }
   | { kind: "publishing" }
   | { kind: "done"; url: string };
+
+/** Server codes meaning "narration is missing; resend with allowMissingAudio to publish anyway". */
+const MISSING_AUDIO_CODES = new Set(["narration_incomplete", "missing_audio", "narration_missing"]);
 
 interface AvailabilityResponse {
   available: boolean;
@@ -72,6 +81,7 @@ export function PublishDialog({ project, voice, onClose, onProjectUpdate }: Publ
   const dialogRef = useRef<HTMLDivElement | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
   const copyButtonRef = useRef<HTMLButtonElement | null>(null);
+  const confirmRef = useRef<HTMLInputElement | null>(null);
 
   const [suffix, setSuffix] = useState<string | null>(null);
   const [prefix, setPrefix] = useState<string>(PUBLISH_NAME_PREFIX);
@@ -83,6 +93,7 @@ export function PublishDialog({ project, voice, onClose, onProjectUpdate }: Publ
   const [phase, setPhase] = useState<Phase>({ kind: "edit" });
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const [confirmedMissing, setConfirmedMissing] = useState(false);
 
   const { isAvailable: isTemplateAvailable } = useAvailableTemplates();
   // Case studies publish their own layout, so a stale template id doesn't block them.
@@ -113,6 +124,7 @@ export function PublishDialog({ project, voice, onClose, onProjectUpdate }: Publ
       ids: summary.needed,
     };
   }, [project, voice]);
+  const unit = missingNarration.kind === "case-study" ? "section" : "chapter";
 
   // Fixed prefix + suffix from the server, then a default name (current address, else from the title).
   useEffect(() => {
@@ -198,6 +210,7 @@ export function PublishDialog({ project, voice, onClose, onProjectUpdate }: Publ
   // The form (and its focused field) is replaced by the result view: keep focus inside the dialog.
   useEffect(() => {
     if (phase.kind === "done") copyButtonRef.current?.focus();
+    if (phase.kind === "confirm-missing") confirmRef.current?.focus();
   }, [phase.kind]);
 
   const handleKeyDown = useCallback(
@@ -225,9 +238,23 @@ export function PublishDialog({ project, voice, onClose, onProjectUpdate }: Publ
     [busy, onClose]
   );
 
-  // Same client call + NDJSON stream handling as the project page's
-  // "Generate audio" / "Generate narration audio" buttons.
-  async function generateMissingNarration() {
+  /** Names of chapters / sections, for "these still have no narration" lists. */
+  function itemName(itemId: string): string {
+    if (missingNarration.kind === "case-study") {
+      const section = flattenCaseStudySections(project.caseStudyBinding?.slots ?? null).find((entry) => entry.key === itemId);
+      return section ? `${section.sectionLabel}${section.index !== null ? ` ${section.index + 1}` : ""}` : "a section";
+    }
+    const chunk = project.chunks.find((entry) => entry.id === itemId);
+    return chunk ? `Chapter ${chunk.order}${chunk.title ? `: ${chunk.title}` : ""}` : "a chapter";
+  }
+
+  /**
+   * Same client call + NDJSON stream handling as the project page's narration
+   * buttons. Returns the ids that still need narration afterwards (failures,
+   * or a stream cut off by the server's time limit), using the freshest
+   * project the server sent back.
+   */
+  async function generateMissingNarration(): Promise<string[]> {
     const isCaseStudy = missingNarration.kind === "case-study";
     const endpoint = isCaseStudy ? "generate-case-study-audio" : "generate-audio";
     // onlyMissing: the server skips anything that already has audio (and saves
@@ -238,34 +265,79 @@ export function PublishDialog({ project, voice, onClose, onProjectUpdate }: Publ
       : { voice, chunkIds: missingNarration.ids, onlyMissing: true };
     setPhase({ kind: "narrating", completed: 0, total: missingNarration.count });
 
-    const res = await fetch(`/api/projects/${project.id}/${endpoint}`, {
+    let fresh: Project | null = null;
+    let cut = false;
+    // The server stops each call at its time budget and reports `remaining`: keep going until none are left.
+    for (let round = 0; round < 20; round++) {
+      const res = await fetch(`/api/projects/${project.id}/${endpoint}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      await ensureOk(res, "Narration couldn't be generated.");
+
+      let remaining = 0;
+      let quota = false;
+      let sawDone = false;
+      const { completed } = await readNdjsonStream(res, (message) => {
+        const msg = message as
+          | { type: "progress"; completed: number; total: number }
+          | { type: "done"; project: Project; remaining?: number; quotaExceeded?: unknown }
+          | { type: "error"; message: string; code?: string };
+        if (msg.type === "progress") setPhase({ kind: "narrating", completed: msg.completed, total: msg.total });
+        else if (msg.type === "done") {
+          sawDone = true;
+          fresh = msg.project;
+          remaining = msg.remaining ?? 0;
+          quota = Boolean(msg.quotaExceeded);
+          onProjectUpdate(msg.project);
+        } else if (msg.type === "error") throw streamError(msg.message, msg.code, "Narration couldn't be generated.");
+      });
+      if (!completed || !sawDone) {
+        cut = true;
+        break;
+      }
+      if (quota || remaining === 0) break;
+    }
+
+    if (cut || !fresh) {
+      // Cut off part-way: re-read what the server saved.
+      try {
+        const reread = await fetch(`/api/projects/${project.id}`, { cache: "no-store" });
+        const data = await readJson<{ project: Project }>(reread);
+        fresh = data.project;
+        onProjectUpdate(data.project);
+      } catch {
+        return missingNarration.ids;
+      }
+    }
+    return summarizeNarration(fresh as Project, voice || undefined).needed;
+  }
+
+  async function publish(allowMissingAudio: boolean) {
+    setPhase({ kind: "publishing" });
+    const res = await fetch(`/api/projects/${project.id}/publish`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
+      body: JSON.stringify({
+        ...(keepingLegacy ? {} : { subdomain: validation.value }),
+        ...(allowMissingAudio ? { allowMissingAudio: true } : {}),
+      }),
     });
-    if (!res.ok) {
-      const data = await res.json().catch(() => ({}));
-      throw new Error(data.error || "Failed to generate narration.");
+    let data: { project: Project; url?: string };
+    try {
+      data = await readJson<{ project: Project; url?: string }>(res, "The site couldn't be published.");
+    } catch (err) {
+      if (err instanceof ApiError && err.code && MISSING_AUDIO_CODES.has(err.code)) {
+        setConfirmedMissing(false);
+        const missing = Array.isArray(err.data?.missing) ? (err.data.missing as unknown[]).filter((v): v is string => typeof v === "string") : [];
+        setPhase({ kind: "confirm-missing", ids: missing.length > 0 ? missing : missingNarration.ids, reason: err.message });
+        return;
+      }
+      throw err;
     }
-
-    let failures: unknown[] | undefined;
-    await readNdjsonStream(res, (message) => {
-      const msg = message as
-        | { type: "progress"; completed: number; total: number }
-        | { type: "done"; project: Project; failures?: unknown[] }
-        | { type: "error"; message: string };
-      if (msg.type === "progress") setPhase({ kind: "narrating", completed: msg.completed, total: msg.total });
-      else if (msg.type === "done") {
-        onProjectUpdate(msg.project);
-        failures = msg.failures;
-      } else if (msg.type === "error") throw new Error(msg.message);
-    });
-
-    if (failures && failures.length > 0) {
-      throw new Error(
-        `${failures.length} chapter(s) failed to get narration (network hiccup). Nothing was published. Click Publish again to retry the missing ones.`
-      );
-    }
+    onProjectUpdate(data.project);
+    setPhase({ kind: "done", url: data.url || data.project?.publishedUrl || "" });
   }
 
   async function handlePublish(event?: React.FormEvent) {
@@ -273,20 +345,37 @@ export function PublishDialog({ project, voice, onClose, onProjectUpdate }: Publ
     if ((!keepingLegacy && !validation.ok) || !canPublish) return;
     setError(null);
     try {
-      if (missingNarration.count > 0) await generateMissingNarration();
-
-      setPhase({ kind: "publishing" });
-      const res = await fetch(`/api/projects/${project.id}/publish`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(keepingLegacy ? {} : { subdomain: validation.value }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "Failed to publish.");
-      onProjectUpdate(data.project);
-      setPhase({ kind: "done", url: data.url || data.project?.publishedUrl });
+      if (missingNarration.count > 0) {
+        if (!voice) {
+          setConfirmedMissing(false);
+          setPhase({ kind: "confirm-missing", ids: missingNarration.ids, reason: "No voice is chosen, so narration can't be recorded." });
+          return;
+        }
+        const stillMissing = await generateMissingNarration();
+        if (stillMissing.length > 0) {
+          setConfirmedMissing(false);
+          setPhase({
+            kind: "confirm-missing",
+            ids: stillMissing,
+            reason: "Narration couldn't be recorded for everything (the server stopped or some items failed). What finished is saved.",
+          });
+          return;
+        }
+      }
+      await publish(false);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to publish.");
+      setError(errorMessage(err, "The site couldn't be published. Try again."));
+      setPhase({ kind: "edit" });
+    }
+  }
+
+  async function publishWithoutMissing() {
+    if (!confirmedMissing) return;
+    setError(null);
+    try {
+      await publish(true);
+    } catch (err) {
+      setError(errorMessage(err, "The site couldn't be published. Try again."));
       setPhase({ kind: "edit" });
     }
   }
@@ -301,10 +390,8 @@ export function PublishDialog({ project, voice, onClose, onProjectUpdate }: Publ
     }
   }
 
-  const needsVoice = missingNarration.count > 0 && !voice;
   const canPublish =
     !busy &&
-    !needsVoice &&
     !templateGone &&
     (keepingLegacy || check.kind === "available" || check.kind === "yours" || check.kind === "current");
   const changingAddress =
@@ -313,12 +400,12 @@ export function PublishDialog({ project, voice, onClose, onProjectUpdate }: Publ
 
   const statusTone =
     check.kind === "available" || check.kind === "current" || check.kind === "yours"
-      ? "text-emerald-700 dark:text-emerald-300"
+      ? "text-emerald-800 dark:text-emerald-300"
       : check.kind === "taken" || check.kind === "invalid"
-        ? "text-red-600 dark:text-red-400"
+        ? "text-red-700 dark:text-red-300"
         : check.kind === "unknown"
-          ? "text-amber-700 dark:text-amber-300"
-          : "text-neutral-500 dark:text-indigo-200/60";
+          ? "text-amber-800 dark:text-amber-200"
+          : "text-muted-foreground";
   const statusText =
     check.kind === "idle"
       ? `Lowercase letters, numbers and hyphens, 3 to ${maxNameLength(prefix)} characters.`
@@ -350,14 +437,20 @@ export function PublishDialog({ project, voice, onClose, onProjectUpdate }: Publ
         aria-labelledby={titleId}
         aria-describedby={descriptionId}
         onKeyDown={handleKeyDown}
-        className="flex w-full max-w-lg flex-col gap-4 rounded-2xl border border-neutral-200 bg-white p-6 text-neutral-900 shadow-2xl dark:border-white/10 dark:bg-neutral-950 dark:text-white dark:shadow-[0_0_60px_rgba(16,185,129,0.12)]"
+        className="flex max-h-[calc(100dvh-2rem)] w-full max-w-lg flex-col gap-4 overflow-y-auto rounded-2xl border border-neutral-200 bg-white p-5 text-neutral-900 shadow-2xl dark:border-white/10 dark:bg-neutral-950 dark:text-white dark:shadow-[0_0_60px_rgba(16,185,129,0.12)] sm:p-6"
       >
         <div className="flex items-start justify-between gap-4">
           <div>
             <h2 id={titleId} className="text-lg font-semibold tracking-tight">
-              {phase.kind === "done" ? "Your story is live" : isUpdate ? "Publish update" : "Publish your story"}
+              {phase.kind === "done"
+                ? "Your story is live"
+                : phase.kind === "confirm-missing"
+                  ? "Publish without some narration?"
+                  : isUpdate
+                    ? "Publish update"
+                    : "Publish your story"}
             </h2>
-            <p id={descriptionId} className="mt-1 text-xs text-neutral-500 dark:text-indigo-200/60">
+            <p id={descriptionId} className="mt-1 text-sm text-muted-foreground">
               {phase.kind === "done"
                 ? "Anyone with this link can view it. It isn't listed in search engines."
                 : isUpdate
@@ -370,9 +463,11 @@ export function PublishDialog({ project, voice, onClose, onProjectUpdate }: Publ
             onClick={onClose}
             disabled={busy}
             aria-label="Close"
-            className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full border border-neutral-200 bg-neutral-50 text-neutral-600 transition-colors hover:bg-neutral-100 disabled:opacity-30 dark:border-white/10 dark:bg-white/5 dark:text-indigo-100 dark:hover:bg-white/10"
+            className={buttonClass("secondary", "xs", "h-8 w-8 shrink-0 px-0")}
           >
-            ✕
+            <svg aria-hidden viewBox="0 0 16 16" className="h-3.5 w-3.5" fill="none">
+              <path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+            </svg>
           </button>
         </div>
 
@@ -382,27 +477,61 @@ export function PublishDialog({ project, voice, onClose, onProjectUpdate }: Publ
               {phase.url}
             </p>
             <div className="flex flex-wrap items-center gap-3">
-              <button
-                ref={copyButtonRef}
-                type="button"
-                onClick={() => handleCopy(phase.url)}
-                className="rounded-full border border-neutral-200 bg-neutral-50 px-4 py-2 text-sm font-medium text-neutral-700 transition-colors hover:bg-neutral-100 active:scale-[0.98] dark:border-white/10 dark:bg-white/5 dark:text-indigo-100 dark:hover:bg-white/10"
-              >
+              <Button ref={copyButtonRef} size="md" onClick={() => handleCopy(phase.url)}>
                 {copied ? "Copied" : "Copy link"}
-              </button>
-              <a
-                href={phase.url}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="rounded-full bg-emerald-500 px-5 py-2 text-sm font-semibold text-neutral-950 shadow-[0_0_28px_rgba(16,185,129,0.45)] transition hover:brightness-110 active:scale-[0.98]"
-              >
-                Open site ↗
+              </Button>
+              <a href={phase.url} target="_blank" rel="noopener noreferrer" className={buttonClass("success", "md")}>
+                Open site<span className="sr-only"> (new tab)</span> <span aria-hidden>↗</span>
               </a>
               <span className="sr-only" aria-live="polite">
                 {copied ? "Link copied to clipboard" : ""}
               </span>
             </div>
-            {error && <p className="text-xs text-red-600 dark:text-red-400">{error}</p>}
+            {error && (
+              <p role="alert" className="text-xs text-red-700 dark:text-red-300">
+                {error}
+              </p>
+            )}
+          </div>
+        ) : phase.kind === "confirm-missing" ? (
+          <div className="flex flex-col gap-3">
+            <p className="text-sm">{phase.reason}</p>
+            <p className="text-sm">
+              These {missingNarration.kind === "case-study" ? "sections" : "chapters"} would be published without sound:
+            </p>
+            <ul className="max-h-40 list-disc overflow-y-auto rounded-xl bg-amber-50 py-2 pl-7 pr-3 text-sm text-amber-950 dark:bg-amber-400/10 dark:text-amber-100">
+              {phase.ids.map((itemId) => (
+                <li key={itemId}>{itemName(itemId)}</li>
+              ))}
+            </ul>
+            <label className="flex cursor-pointer items-start gap-2 text-sm">
+              <input
+                type="checkbox"
+                ref={confirmRef}
+                checked={confirmedMissing}
+                onChange={(event) => setConfirmedMissing(event.target.checked)}
+                className="mt-1 accent-emerald-600"
+              />
+              <span>I understand visitors won&apos;t hear narration for these. Publish anyway.</span>
+            </label>
+            {error && (
+              <p role="alert" className="text-xs text-red-700 dark:text-red-300">
+                {error}
+              </p>
+            )}
+            <div className="flex flex-wrap items-center justify-end gap-2">
+              <Button size="md" onClick={() => setPhase({ kind: "edit" })}>
+                Back
+              </Button>
+              {voice && (
+                <Button size="md" onClick={() => void handlePublish()}>
+                  Try narration again
+                </Button>
+              )}
+              <Button variant="success" size="md" onClick={() => void publishWithoutMissing()} disabled={!confirmedMissing}>
+                Publish without it
+              </Button>
+            </div>
           </div>
         ) : (
           <form onSubmit={handlePublish} className="flex flex-col gap-4" noValidate>
@@ -419,7 +548,7 @@ export function PublishDialog({ project, voice, onClose, onProjectUpdate }: Publ
                   />
                   <span className="min-w-0">
                     Keep the current address
-                    <span className="block break-all text-xs text-neutral-500 dark:text-indigo-200/60">{legacyUrl}</span>
+                    <span className="block break-all text-xs text-muted-foreground">{legacyUrl}</span>
                   </span>
                 </label>
                 <label className="flex cursor-pointer items-start gap-2 text-sm text-neutral-700 dark:text-indigo-100">
@@ -442,9 +571,9 @@ export function PublishDialog({ project, voice, onClose, onProjectUpdate }: Publ
               <label htmlFor={inputId} className="text-sm font-semibold text-neutral-800 dark:text-indigo-100">
                 Site address
               </label>
-              <div className="flex items-stretch overflow-hidden rounded-xl border border-neutral-200 bg-neutral-50 focus-within:border-violet-400 dark:border-white/10 dark:bg-black/30 dark:focus-within:border-violet-400/60">
-                <span className="flex items-center whitespace-nowrap pl-3 text-sm text-neutral-500 dark:text-indigo-200/60">
-                  <span className="hidden text-neutral-400 dark:text-indigo-200/40 sm:inline">https://</span>
+              <div className="flex items-stretch overflow-hidden rounded-xl border border-neutral-300 bg-white focus-within:border-violet-500 focus-within:ring-2 focus-within:ring-ring dark:border-white/15 dark:bg-black/30 dark:focus-within:border-violet-400">
+                <span className="flex items-center whitespace-nowrap pl-3 text-sm text-muted-foreground">
+                  <span className="hidden sm:inline">https://</span>
                   {prefix}
                 </span>
                 <input
@@ -471,9 +600,9 @@ export function PublishDialog({ project, voice, onClose, onProjectUpdate }: Publ
                   aria-invalid={check.kind === "invalid" || check.kind === "taken"}
                   aria-describedby={statusId}
                   placeholder="acme-hr"
-                  className="min-w-0 flex-1 bg-transparent px-1 py-2 text-sm font-medium text-neutral-900 placeholder:text-neutral-400 focus:outline-none disabled:opacity-60 dark:text-white dark:placeholder:text-indigo-200/30"
+                  className="min-w-0 flex-1 bg-transparent px-1 py-2 text-sm font-medium text-neutral-900 placeholder:text-neutral-500 focus-visible:outline-none disabled:opacity-60 dark:text-white dark:placeholder:text-indigo-200/50"
                 />
-                <span className="flex items-center whitespace-nowrap pr-3 text-sm text-neutral-500 dark:text-indigo-200/60">
+                <span className="flex items-center whitespace-nowrap pr-3 text-sm text-muted-foreground">
                   {suffix ?? "…"}
                 </span>
               </div>
@@ -481,62 +610,54 @@ export function PublishDialog({ project, voice, onClose, onProjectUpdate }: Publ
                 {statusText}
               </p>
               {changingAddress && (
-                <p className="text-xs text-amber-700 dark:text-amber-300">
-                  This changes the address. The old site at{" "}
-                  {legacyUrl ?? `${prefix}${currentSubdomain}${suffix}`} stays online until it is removed from the
-                  hosting account.
+                <p className="text-xs text-amber-800 dark:text-amber-200">
+                  This changes the address. The old site at {legacyUrl ?? `${prefix}${currentSubdomain}${suffix}`} stays
+                  online; ask your admin to take it down if it should go.
                 </p>
               )}
             </div>
 
             {missingNarration.count > 0 && phase.kind === "edit" && (
-              <p className="text-xs text-neutral-500 dark:text-indigo-200/60">
+              <p className="text-xs text-muted-foreground">
                 {missingNarration.outdated > 0
-                  ? `Narration needs updating for ${plural(missingNarration.outdated, "chapter")}`
+                  ? `Narration needs updating for ${plural(missingNarration.outdated, unit)}`
                   : ""}
                 {missingNarration.outdated > 0 && missingNarration.count > missingNarration.outdated ? " and " : ""}
                 {missingNarration.count > missingNarration.outdated
-                  ? `${plural(missingNarration.count - missingNarration.outdated, "chapter")} ${
+                  ? `${plural(missingNarration.count - missingNarration.outdated, unit)} ${
                       missingNarration.count - missingNarration.outdated === 1 ? "has" : "have"
                     } no narration yet`
                   : ""}
-                . It will be generated first{voice ? ` with the ${voice} voice` : ""}.
-                {needsVoice && " Pick a voice on the project page first."}
+                .{" "}
+                {voice
+                  ? `It's recorded first, in the voice ${friendlyVoiceId(voice)}. Keep this window open.`
+                  : "No voice is chosen, so you'll be asked whether to publish without it."}
               </p>
             )}
 
             {phase.kind === "narrating" && (
               <LoadingBar
-                label={`Generating narration ${Math.min(phase.completed + 1, phase.total)}/${phase.total}`}
+                label={`Recording narration ${Math.min(phase.completed + 1, phase.total)} of ${phase.total}…`}
                 progress={phase.total > 0 ? phase.completed / phase.total : undefined}
                 detail={`${phase.completed} / ${phase.total} done`}
               />
             )}
-            {phase.kind === "publishing" && <LoadingBar label="Publishing the site… this can take a minute or two." />}
+            {phase.kind === "publishing" && <LoadingBar label="Publishing the site… this usually takes 1 to 2 minutes. Keep this window open." />}
 
             {templateGone && (
-              <p className="text-xs font-medium text-amber-700 dark:text-amber-300">{TEMPLATE_UNAVAILABLE_NOTICE}</p>
+              <p className="text-xs font-medium text-amber-800 dark:text-amber-200">{TEMPLATE_UNAVAILABLE_NOTICE}</p>
             )}
             {error && (
-              <p role="alert" className="text-xs text-red-600 dark:text-red-400">
+              <p role="alert" className="text-xs text-red-700 dark:text-red-300">
                 {error}
               </p>
             )}
 
             <div className="flex flex-wrap items-center justify-end gap-3">
-              <button
-                type="button"
-                onClick={onClose}
-                disabled={busy}
-                className="rounded-full border border-neutral-200 bg-neutral-50 px-4 py-2 text-sm font-medium text-neutral-700 transition-colors hover:bg-neutral-100 active:scale-[0.98] disabled:opacity-30 dark:border-white/10 dark:bg-white/5 dark:text-indigo-100 dark:hover:bg-white/10"
-              >
+              <Button size="md" onClick={onClose} disabled={busy}>
                 Cancel
-              </button>
-              <button
-                type="submit"
-                disabled={!canPublish}
-                className="rounded-full bg-emerald-500 px-5 py-2 text-sm font-semibold text-neutral-950 shadow-[0_0_28px_rgba(16,185,129,0.45)] transition hover:brightness-110 active:scale-[0.98] disabled:opacity-30"
-              >
+              </Button>
+              <button type="submit" disabled={!canPublish} className={buttonClass("success", "md")}>
                 {phase.kind === "narrating"
                   ? "Generating narration…"
                   : phase.kind === "publishing"

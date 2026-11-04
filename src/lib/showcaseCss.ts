@@ -57,6 +57,43 @@ html.pt-leaving .fw-row[data-col="1"]:not([data-pt-active]) .fw-main {
 .pd-fade {
   transition: opacity 1s ease var(--pd-d, 0s);
 }
+/* chapter page zigzag. Phones: one column (title, pictures, text) because the two
+   wrappers dissolve into the flex column. >= 900px: pictures on one side, title +
+   narration + links (sticky) on the other, swapping sides each chapter. */
+.pd-split { display: flex; flex-direction: column; align-items: center; gap: 10vw; }
+.pd-media, .pd-panel { display: contents; }
+.pd-head { order: -1; width: 100%; }
+.pd-title { font-size: var(--pd-title-m); }
+.pd-tags { font-size: 0.75rem; }
+@media (min-width: 900px) {
+  .pd-split {
+    display: grid;
+    grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr);
+    align-items: start;
+    gap: clamp(40px, 5vw, 96px);
+    width: min(100%, 1320px);
+    margin: 0 auto;
+  }
+  .pd-split.pd-text-left { grid-template-columns: minmax(0, 1fr) minmax(0, 1.3fr); }
+  .pd-media { display: flex; flex-direction: column; align-items: center; gap: 11vh; min-width: 0; grid-row: 1; grid-column: 1; }
+  .pd-panel {
+    display: flex;
+    flex-direction: column;
+    gap: clamp(28px, 3vw, 48px);
+    min-width: 0;
+    grid-row: 1;
+    grid-column: 2;
+    position: sticky;
+    top: calc(var(--sc-pad-y) + 72px);
+  }
+  .pd-text-left .pd-panel { grid-column: 1; }
+  .pd-text-left .pd-media { grid-column: 2; }
+  .pd-panel.pd-tall { position: relative; top: 0; }
+  .pd-media > figure { width: var(--pd-w); }
+  .pd-head { order: 0; }
+  .pd-title { font-size: var(--pd-title); }
+  .pd-tags { font-size: clamp(12px, 0.8vw, 14px); }
+}
 /* chapter page blocks rise into place from below as they scroll into view */
 .sc-rise {
   opacity: 0;
@@ -89,9 +126,11 @@ html[data-pt-back] .fw-media {
   .sc-menu-link { font-size: var(--sc-menu-size-m, 8vw); }
 }
 
-/* narration text: words light up as the audio plays */
-.sc-text[data-audio] .sc-word { opacity: 0.45; transition: opacity 0.3s ease; }
-.sc-text[data-audio] .sc-word.on { opacity: 1; }
+/* narration text: words light up as the audio plays. They dim only while the
+   chapter's audio is actually playing (sc-live), so the text is readable without sound. */
+.sc-text[data-audio] .sc-word { transition: opacity 0.3s ease; }
+.sc-text.sc-live[data-audio] .sc-word { opacity: 0.45; }
+.sc-text.sc-live[data-audio] .sc-word.on { opacity: 1; }
 
 /* the shared narration dock, dressed like the template's pills */
 .sc-root .nd-dock {

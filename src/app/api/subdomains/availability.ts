@@ -13,15 +13,22 @@
  *
  * `name` is what the user typed (stored in projects.subdomain); the Vercel
  * project name and host label are PUBLISH_NAME_PREFIX + name (see subdomain.ts).
+ *
+ * Ownership (SEC-09): a Vercel project with this name is only "yours" when this
+ * app's records (site_names, else publications) say this project published it,
+ * or the same user did from a project that no longer exists. Any other project
+ * on the hosting account, including old sites of other users and anything
+ * deployed outside this app, is never deployed over.
  */
 import { getSupabase } from "@/lib/db";
 import { authEnabled } from "@/lib/auth/session";
 import { getPublishNamePrefix, siteLabel, validateSubdomain } from "@/lib/subdomain";
+import { siteOwnership } from "@/lib/server/siteNames";
 import {
+  publishTokenConfigured,
   findAliasProjectId,
   findVercelProject,
   getPublishBaseDomain,
-  isStorySiteProject,
   probeHost,
   projectHasDomain,
   siteHostFor,
@@ -52,7 +59,7 @@ function appOwnLabel(): string | null {
 
 export async function checkSubdomainAvailability(
   rawName: string,
-  options: { projectId?: string | null } = {}
+  options: { projectId?: string | null; userId?: string | null } = {}
 ): Promise<SubdomainAvailability> {
   const prefix = getPublishNamePrefix();
   const validation = validateSubdomain(rawName, prefix);
@@ -79,25 +86,33 @@ export async function checkSubdomainAvailability(
     }
   }
 
+  // 2. The permanent record of published addresses: an address another story or
+  //    user published stays theirs, also after that story was deleted.
+  const ownership = await siteOwnership(name, options.projectId ?? null, options.userId ?? null);
+  if (ownership === "other") {
+    return { available: false, status: "taken", reason: "Another story already used this address. Try another.", url };
+  }
+
   // Local-only publishing (no token): nothing on Vercel to collide with.
-  if (!process.env.VERCEL_TOKEN) {
+  if (!publishTokenConfigured()) {
     return { available: true, status: "available", reason: "Available.", url };
   }
 
-  // 2. A Vercel project with this name on our account.
+  // 3. A Vercel project with this name on our account is only ours to replace when
+  //    our records say this story (or this user's deleted story) published it.
   const project = await findVercelProject(label);
-  if (project && !isStorySiteProject(project)) {
+  if (project && ownership === "unrecorded") {
     return {
       available: false,
       status: "taken",
-      reason: "This name is used by another app on the hosting account. Try another.",
+      reason: "A site with this address already exists on the hosting account and was not published from this story. Try another.",
       url,
     };
   }
 
   const baseDomain = getPublishBaseDomain();
   if (baseDomain) {
-    // 3a. Custom base domain: the full host must not be attached to a different project.
+    // 4a. Custom base domain: the full host must not be attached to a different project.
     if (project && (await projectHasDomain(project.name, host))) {
       return { available: true, status: "yours", reason: YOURS_REASON, url };
     }
@@ -110,7 +125,7 @@ export async function checkSubdomainAvailability(
       : { available: true, status: "available", reason: "Available.", url };
   }
 
-  // 3b. <label>.vercel.app. A project of ours with this name only owns the
+  // 4b. <label>.vercel.app. A project of ours with this name only owns the
   // alias if Vercel actually assigned it (a globally taken name gets a
   // suffixed alias instead), so confirm via the alias lookup.
   if (project && (await findAliasProjectId(host)) === project.id) {

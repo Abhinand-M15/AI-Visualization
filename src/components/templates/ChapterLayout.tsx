@@ -4,7 +4,9 @@ import { useEffect, useRef, type CSSProperties, type ReactNode } from "react";
 import {
   CHAPTER_LAYOUT_CSS,
   CHAPTER_MEDIA_MAX,
+  chapterLayoutClass,
   chapterNextLabel,
+  chapterQuoteCard,
   chapterThemeVars,
   initChapterLayout,
   type ChapterLists,
@@ -20,7 +22,7 @@ export interface ChapterMediaItem {
 /**
  * The shared chapter layout (see src/lib/chapterLayout.ts): pictures stacked
  * vertically as large rounded frames with a soft scroll entrance, and a sticky
- * text panel beside them. `children` is the narration text (the template keeps
+ * text panel beside them, on alternating sides per chapter (chapterLayoutClass). `children` is the narration text (the template keeps
  * its own word-highlight markup and <audio>); everything else is theme tokens
  * and data. The static published pages render the twin of this via
  * chapterLayoutHtml().
@@ -51,18 +53,31 @@ export function ChapterLayout({
 }) {
   const ref = useRef<HTMLDivElement>(null);
   useEffect(() => (ref.current ? initChapterLayout(ref.current) : undefined), []);
+  const shown = media.slice(0, CHAPTER_MEDIA_MAX);
+  // No picture: the visual side is the chapter's pull-quote card (same rule as chapterLayoutHtml).
+  const card = shown.length === 0 ? chapterQuoteCard(lists, eyebrow, title) : null;
+  const panelLists = card ? card.panelLists : lists;
 
   return (
-    <div ref={ref} className="cl" style={chapterThemeVars(theme) as CSSProperties}>
+    <div ref={ref} className={chapterLayoutClass(index)} style={chapterThemeVars(theme) as CSSProperties}>
       <style href="chapter-layout-css" precedence="default">
         {CHAPTER_LAYOUT_CSS}
       </style>
       <div className="cl-media">
-        {media.slice(0, CHAPTER_MEDIA_MAX).map((item, i) => (
-          <figure key={i} className={`cl-fig cl-fig-${item.kind}`}>
-            {item.kind === "avatar" ? <div className="cl-fill">{item.node}</div> : item.node}
+        {card ? (
+          <figure className="cl-fig cl-fig-quote">
+            <blockquote className="cl-quote">
+              <p>{card.quote}</p>
+              <footer>{card.label}</footer>
+            </blockquote>
           </figure>
-        ))}
+        ) : (
+          shown.map((item, i) => (
+            <figure key={i} className={`cl-fig cl-fig-${item.kind}`}>
+              {item.kind === "avatar" ? <div className="cl-fill">{item.node}</div> : item.node}
+            </figure>
+          ))
+        )}
       </div>
       <aside className="cl-panel">
         <span className="cl-eyebrow">{eyebrow}</span>
@@ -71,10 +86,10 @@ export function ChapterLayout({
         <button type="button" className="cl-pill" data-cl-custom={onNext ? "" : undefined} onClick={onNext}>
           {nextLabel ?? chapterNextLabel(index, total)}
         </button>
-        {(lists.keyPoints.length > 0 || lists.upNext.length > 0) && (
+        {(panelLists.keyPoints.length > 0 || panelLists.upNext.length > 0) && (
           <div className="cl-lists">
-            <ListBlock label="Key points" items={lists.keyPoints} />
-            <ListBlock label="Up next" items={lists.upNext} />
+            <ListBlock label="Key points" items={panelLists.keyPoints} />
+            <ListBlock label="Up next" items={panelLists.upNext} />
           </div>
         )}
       </aside>

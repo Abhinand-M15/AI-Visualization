@@ -9,7 +9,7 @@ import { avatarForIndex } from "./types";
 import { AvatarDisplay } from "./AvatarDisplay";
 import { StoryLogo } from "./StoryLogo";
 import { ChapterLayout, type ChapterMediaItem } from "./ChapterLayout";
-import { CHAPTER_THEMES, chapterLists } from "@/lib/chapterLayout";
+import { CHAPTER_THEMES, TEMPLATE_SANS, chapterLists } from "@/lib/chapterLayout";
 import { ASMRBackground } from "@/components/ui/asmr-background";
 import { lunarHeroDescription } from "@/lib/lunarHero";
 import { LunarHero } from "./LunarHero";
@@ -47,7 +47,7 @@ const THEME_CONFIG: Record<CaseStudyTheme, { label: string | null; accent: strin
   light: { label: null, accent: "text-neutral-400", border: "border-neutral-100", glow: "" },
   space: {
     label: "Space",
-    accent: "text-white/40",
+    accent: "text-white/60",
     border: "border-white/15",
     glow: "drop-shadow-[0_0_60px_rgba(180,220,255,0.15)]",
   },
@@ -103,8 +103,6 @@ export default function CaseStudyTemplate({
       const sectionEls = gsap.utils.toArray<HTMLElement>(".case-study-section");
       let currentAudio: HTMLAudioElement | null = null;
       let currentHandler: (() => void) | null = null;
-      const spokenClass = isDark ? "text-white" : "text-neutral-900";
-      const unspokenClass = isDark ? "text-white/25" : "text-neutral-300";
 
       function stopHighlightTracking() {
         if (currentAudio && currentHandler) currentAudio.removeEventListener("timeupdate", currentHandler);
@@ -137,9 +135,10 @@ export default function CaseStudyTemplate({
         // Only the words between the previous and the new position are
         // touched; the first event after a (re)start repaints them all.
         let shown = -2;
+        // Colours come from the shared chapter layout CSS: words dim only while
+        // this section's audio plays (cl-live), so the text is readable without sound.
         function setSpoken(word: HTMLElement, spoken: boolean) {
-          word.classList.toggle(spokenClass, spoken);
-          word.classList.toggle(unspokenClass, !spoken);
+          word.classList.toggle("spoken", spoken);
         }
         function onTimeUpdate() {
           if (!audio.duration) return;
@@ -215,6 +214,7 @@ export default function CaseStudyTemplate({
     <div
       ref={containerRef}
       className={theme === "lunar" ? "relative bg-black text-white" : isDark ? "relative text-white" : "bg-white text-neutral-900"}
+      style={{ fontFamily: TEMPLATE_SANS }}
     >
       <NarrationMasterControl theme={NARRATION_DOCK_THEMES[theme]} />
       <StoryLogo logoUrl={logoUrl} />
@@ -224,7 +224,7 @@ export default function CaseStudyTemplate({
       ) : theme === "lunar" ? (
         <LunarHero title={title} description={lunarHeroDescription(sections[0]?.body)} />
       ) : (
-        <header className="relative px-10 pb-16 pt-24">
+        <header className="relative px-8 pb-16 pt-24">
           {label && <span className={`text-xs font-light uppercase tracking-[0.4em] ${accent}`}>{label}</span>}
           <h1 className={`max-w-3xl text-2xl font-medium leading-tight md:text-[1.75rem] ${isDark ? "mt-4" : ""}`}>
             {title}
@@ -283,7 +283,7 @@ export default function CaseStudyTemplate({
                 {words.map((word, i) => (
                   <span
                     key={i}
-                    className={`word transition-colors duration-150 ${isDark ? "text-white/25" : "text-neutral-300"}`}
+                    className="word"
                   >
                     {word}{" "}
                   </span>

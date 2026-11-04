@@ -1,20 +1,38 @@
 "use client";
 
-import React, { useRef, useMemo, Suspense, useState, useEffect } from "react";
-import { Canvas, useFrame } from "@react-three/fiber";
+import React, { useRef, useMemo, Suspense, useState, useEffect, useSyncExternalStore } from "react";
+import { Canvas, useFrame, useThree } from "@react-three/fiber";
 import { OrbitControls, useTexture, Environment } from "@react-three/drei";
 import * as THREE from "three";
 import { cn } from "@/lib/utils";
 
 const RADIUS = 2.0;
 
-const RealisticMoon = ({ onClick }: { onClick?: () => void }) => {
+// Reduced motion (UI-08), matching the published page: no idle spin, no drift,
+// the ring and belt appear already formed, and a frame is drawn only when
+// something changes (scroll, resize, drag, a texture arriving).
+const REDUCED_QUERY = "(prefers-reduced-motion: reduce)";
+function subscribeReducedMotion(onChange: () => void) {
+  if (typeof window.matchMedia !== "function") return () => {};
+  const query = window.matchMedia(REDUCED_QUERY);
+  query.addEventListener("change", onChange);
+  return () => query.removeEventListener("change", onChange);
+}
+function useReducedMotion(): boolean {
+  return useSyncExternalStore(
+    subscribeReducedMotion,
+    () => typeof window.matchMedia === "function" && window.matchMedia(REDUCED_QUERY).matches,
+    () => false
+  );
+}
+
+const RealisticMoon = ({ onClick, reduced }: { onClick?: () => void; reduced: boolean }) => {
   const meshRef = useRef<THREE.Mesh>(null);
 
   const colorMap = useTexture("https://cdn.21st.dev/assets/mirror/fc/fcb0f1f5548e6e18d40063dd55c6aacd3daedf2407b181dab85b61e22bf9fe57.jpg");
 
   useFrame((_, delta) => {
-    if (meshRef.current) meshRef.current.rotation.y += delta * 0.05;
+    if (meshRef.current && !reduced) meshRef.current.rotation.y += delta * 0.05;
   });
 
   return (
@@ -86,7 +104,7 @@ const [ringPositions, ringColors, ringRandoms] = (() => {
   return [pos, col, rnd];
 })();
 
-const ParticleRing = ({ ringState, massiveAsteroidsRef }: { ringState: 'hidden' | 'animating' | 'visible', massiveAsteroidsRef: React.MutableRefObject<Float32Array> }) => {
+const ParticleRing = ({ ringState, massiveAsteroidsRef, reduced }: { ringState: 'hidden' | 'animating' | 'visible', massiveAsteroidsRef: React.MutableRefObject<Float32Array>, reduced: boolean }) => {
   const pointsRef = useRef<THREE.Points>(null);
 
   const uniforms = useRef({
@@ -104,7 +122,7 @@ const ParticleRing = ({ ringState, massiveAsteroidsRef }: { ringState: 'hidden' 
 
   useFrame((state, delta) => {
     if (pointsRef.current) {
-      pointsRef.current.rotation.y -= delta * 0.02;
+      if (!reduced) pointsRef.current.rotation.y -= delta * 0.02;
       pointsRef.current.updateMatrix();
 
       const { invMat, vec: ast, local: localAsteroids } = scratch.current;
@@ -123,9 +141,11 @@ const ParticleRing = ({ ringState, massiveAsteroidsRef }: { ringState: 'hidden' 
       }
       uniforms.current.uAsteroids.value = localAsteroids;
     }
-    uniforms.current.time.value = state.clock.elapsedTime;
+    if (!reduced) uniforms.current.time.value = state.clock.elapsedTime;
 
-    if (ringState === 'animating') {
+    if (reduced && ringState !== 'hidden') {
+      uniforms.current.uProgress.value = 1.0;
+    } else if (ringState === 'animating') {
       uniforms.current.uProgress.value += delta * 0.35; 
       if (uniforms.current.uProgress.value > 1.0) uniforms.current.uProgress.value = 1.0;
     } else if (ringState === 'visible') {
@@ -135,7 +155,7 @@ const ParticleRing = ({ ringState, massiveAsteroidsRef }: { ringState: 'hidden' 
     }
   });
 
-  const onBeforeCompile = (shader: any) => {
+  const onBeforeCompile = (shader: THREE.WebGLProgramParametersWithUniforms) => {
     shader.uniforms.uProgress = uniforms.current.uProgress;
     shader.uniforms.uAsteroids = uniforms.current.uAsteroids;
     shader.uniforms.time = uniforms.current.time;
@@ -276,7 +296,7 @@ const generateAsteroids = (count: number) => {
   return data;
 };
 
-const AsteroidBelt = ({ ringState, massiveAsteroidsRef }: { ringState: 'hidden' | 'animating' | 'visible', massiveAsteroidsRef: React.MutableRefObject<Float32Array> }) => {
+const AsteroidBelt = ({ ringState, massiveAsteroidsRef, reduced }: { ringState: 'hidden' | 'animating' | 'visible', massiveAsteroidsRef: React.MutableRefObject<Float32Array>, reduced: boolean }) => {
   const meshRef = useRef<THREE.InstancedMesh>(null);
 
   const [colorMap, bumpMap] = useTexture([
@@ -296,7 +316,7 @@ const AsteroidBelt = ({ ringState, massiveAsteroidsRef }: { ringState: 'hidden' 
 
     const targetScale = ringState === 'hidden' ? 0 : 1;
     const lerpSpeed = ringState === 'hidden' ? 5 : 2;
-    scaleRef.current = THREE.MathUtils.lerp(scaleRef.current, targetScale, delta * lerpSpeed);
+    scaleRef.current = reduced ? targetScale : THREE.MathUtils.lerp(scaleRef.current, targetScale, delta * lerpSpeed);
 
     if (scaleRef.current < 0.01) {
       meshRef.current.visible = false;
@@ -306,9 +326,10 @@ const AsteroidBelt = ({ ringState, massiveAsteroidsRef }: { ringState: 'hidden' 
 
     asteroids.forEach((ast, i) => {
 
-      ast.angle += ast.speed * delta; 
-
-      ast.phase += ast.radialSpeed * delta;
+      if (!reduced) {
+        ast.angle += ast.speed * delta;
+        ast.phase += ast.radialSpeed * delta;
+      }
       let currentRadius = ast.baseRadius + Math.sin(ast.phase) * ast.radialAmplitude;
 
       if (currentRadius < 2.15) {
@@ -324,9 +345,11 @@ const AsteroidBelt = ({ ringState, massiveAsteroidsRef }: { ringState: 'hidden' 
       massiveAsteroidsRef.current[i * 4 + 2] = ast.zOffset;
       massiveAsteroidsRef.current[i * 4 + 3] = ast.scale;
 
-      ast.rx += ast.rsx;
-      ast.ry += ast.rsy;
-      ast.rz += ast.rsz;
+      if (!reduced) {
+        ast.rx += ast.rsx;
+        ast.ry += ast.rsy;
+        ast.rz += ast.rsz;
+      }
 
       dummy.position.set(x, y, ast.zOffset);
       dummy.rotation.set(ast.rx, ast.ry, ast.rz);
@@ -368,7 +391,7 @@ const CARD_RADIUS = 40;
 // canvas whose size never changes: the visible window is a clip-path and the
 // camera view offset, so no layout or canvas resize happens while it moves.
 const HandoffRig = ({
-  groupRef, slotRef, cardRef, layerRef, onRing, onIdle,
+  groupRef, slotRef, cardRef, layerRef, onRing, onIdle, reduced,
 }: {
   groupRef: React.RefObject<THREE.Group | null>;
   slotRef: React.RefObject<HTMLDivElement | null>;
@@ -376,7 +399,20 @@ const HandoffRig = ({
   layerRef: React.RefObject<HTMLDivElement | null>;
   onRing: () => void;
   onIdle: () => void;
+  reduced: boolean;
 }) => {
+  // On demand rendering (reduced motion): scroll and resize ask for one new frame.
+  const invalidate = useThree((state) => state.invalidate);
+  useEffect(() => {
+    if (!reduced) return;
+    const request = () => invalidate();
+    window.addEventListener("scroll", request, { passive: true });
+    window.addEventListener("resize", request);
+    return () => {
+      window.removeEventListener("scroll", request);
+      window.removeEventListener("resize", request);
+    };
+  }, [reduced, invalidate]);
   const easedRef = useRef(0);
   const initRef = useRef(false);
   const settledKeyRef = useRef("");
@@ -386,7 +422,7 @@ const HandoffRig = ({
     const vw = window.innerWidth;
     const vh = window.innerHeight;
     const target = Math.min(1, Math.max(0, window.scrollY / (vh * 0.85)));
-    if (!initRef.current) { easedRef.current = target; initRef.current = true; }
+    if (!initRef.current || reduced) { easedRef.current = target; initRef.current = true; }
     easedRef.current += (target - easedRef.current) * (1 - Math.pow(0.001, dt));
     if (Math.abs(target - easedRef.current) < 0.0005) easedRef.current = target;
     const p = easedRef.current;
@@ -462,6 +498,7 @@ export default function LunarGravityCard({
   description = "Embed highly realistic astrophysics directly into your Next.js project. Zero configuration, fully interactive, and flawlessly smooth."
 }: LunarGravityCardProps) {
   const [ringState, setRingState] = useState<'hidden' | 'animating' | 'visible'>('hidden');
+  const reduced = useReducedMotion();
   const massiveAsteroidsRef = useRef<Float32Array>(new Float32Array(60 * 4));
 
   // Render only while the card is on screen and the tab is visible: the scene
@@ -509,7 +546,7 @@ export default function LunarGravityCard({
       <div className="absolute top-0 left-0 md:inset-y-0 md:left-0 w-full h-[60%] md:h-full md:w-[60%] bg-gradient-to-b md:bg-gradient-to-r from-black via-black/90 to-transparent z-10 pointer-events-none"></div>
 
       <div className="w-full md:w-[45%] flex flex-col justify-center px-10 py-12 md:p-0 md:pl-16 relative z-20 pointer-events-none">
-        <h2 className="text-[4.5rem] md:text-[5.5rem] font-bold tracking-tighter leading-[0.9] mb-6">
+        <h2 className="min-w-0 text-[min(4.5rem,15vw)] md:text-[5.5rem] font-bold tracking-tighter leading-[0.9] mb-6 [overflow-wrap:anywhere]">
           {title}
         </h2>
         <p className="text-base md:text-lg text-zinc-400 font-medium leading-relaxed max-w-[340px]">
@@ -519,19 +556,19 @@ export default function LunarGravityCard({
      
       <div ref={slotRef} className="relative md:absolute md:right-0 md:top-0 w-full h-[450px] md:h-full md:w-[65%] pointer-events-auto z-0 flex items-center justify-center">
         <div ref={bgRef} className="fixed inset-0 z-[1] w-screen h-screen" style={{ clipPath: "inset(100%)" }}>
-          <Canvas shadows camera={{ position: [0, 4, 10], fov: 45 }} dpr={dpr} frameloop={(onScreen || inBackground) && tabVisible ? "always" : "never"}>
+          <Canvas shadows camera={{ position: [0, 4, 10], fov: 45 }} dpr={dpr} frameloop={reduced ? "demand" : (onScreen || inBackground) && tabVisible ? "always" : "never"}>
             <ambientLight intensity={0.02} />
             <directionalLight position={[8, 5, 5]} intensity={1.5} color="#ffffff" castShadow shadow-mapSize={[1024, 1024]} />
             <directionalLight position={[-5, -3, -5]} intensity={0.15} color="#4a90e2" />
 
             <OrbitControls enableZoom={false} enablePan={false} autoRotate={false} />
 
-            <HandoffRig groupRef={groupRef} slotRef={slotRef} cardRef={wrapRef} layerRef={bgRef} onRing={onRing} onIdle={onIdle} />
+            <HandoffRig groupRef={groupRef} slotRef={slotRef} cardRef={wrapRef} layerRef={bgRef} onRing={onRing} onIdle={onIdle} reduced={reduced} />
             <group ref={groupRef} rotation={[Math.PI / 8, 0, 0]}>
               <Suspense fallback={null}>
-                <RealisticMoon onClick={() => { if(ringState === 'hidden') setRingState('animating') }} />
-                <ParticleRing ringState={ringState} massiveAsteroidsRef={massiveAsteroidsRef} />
-                <AsteroidBelt ringState={ringState} massiveAsteroidsRef={massiveAsteroidsRef} />
+                <RealisticMoon reduced={reduced} onClick={() => { if(ringState === 'hidden') setRingState('animating') }} />
+                <ParticleRing reduced={reduced} ringState={ringState} massiveAsteroidsRef={massiveAsteroidsRef} />
+                <AsteroidBelt reduced={reduced} ringState={ringState} massiveAsteroidsRef={massiveAsteroidsRef} />
                 <Environment preset="city" />
               </Suspense>
             </group>

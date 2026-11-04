@@ -1,12 +1,17 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { avatarVideoFallbackUrl, getAvatarImage, type Avatar } from "@/lib/avatars";
 import type { EmotionKey } from "@/lib/types";
 import { Avatar3D } from "@/components/ui/avatar-3d";
 import { Avatar3DErrorBoundary } from "@/components/ui/avatar-3d-error-boundary";
 import { hasWebGLSupport } from "@/lib/hasWebGL";
 import { ReactiveMouthOverlay } from "@/components/ui/reactive-mouth-overlay";
+
+// WebGL support never changes during a page's life, so probe once.
+let webGLSupport: boolean | undefined;
+const cachedWebGLSupport = () => (webGLSupport ??= hasWebGLSupport());
+const subscribeNever = () => () => {};
 
 /**
  * Drop-in replacement for the old `<img src={avatarImage} className="..." />`
@@ -63,23 +68,19 @@ export function AvatarDisplay({
   // 3D model / reactive image — only a section-specific video (Wav2Lip,
   // passed as mode="video" + videoUrl) takes priority over it.
   const defaultVideoUrl = avatar.videoUrls?.[0];
-  const [use3D, setUse3D] = useState(false);
+  // False on the server and the first client render, then the real answer, so
+  // hydration matches.
+  const webGL = useSyncExternalStore(subscribeNever, cachedWebGLSupport, () => false);
+  const use3D = mode === "auto" && !!avatar.modelUrl && !defaultVideoUrl && webGL;
   const [reactiveWrapEl, setReactiveWrapEl] = useState<HTMLDivElement | null>(null);
-  const [sectionAudio, setSectionAudio] = useState<HTMLAudioElement | null>(null);
-
-  useEffect(() => {
-    if (mode === "auto" && avatar.modelUrl && !defaultVideoUrl && hasWebGLSupport()) setUse3D(true);
-  }, [mode, avatar.modelUrl, defaultVideoUrl]);
-
-  useEffect(() => {
-    if (mode !== "reactive" || !reactiveWrapEl) return;
-    const section = reactiveWrapEl.closest(".case-study-section, .lunar-section");
-    setSectionAudio(section?.querySelector("audio") ?? null);
-  }, [mode, reactiveWrapEl]);
+  const sectionAudio =
+    mode === "reactive" && reactiveWrapEl
+      ? (reactiveWrapEl.closest(".case-study-section, .lunar-section")?.querySelector("audio") ?? null)
+      : null;
 
   if (mode === "video" && videoUrl) {
     return (
-      // eslint-disable-next-line jsx-a11y/media-has-caption
+       
       <video src={videoUrl} className={className} muted loop playsInline preload="metadata" />
     );
   }
@@ -140,13 +141,13 @@ function InViewVideo({ src, className }: { src: string; className?: string }) {
   const fallback = avatarVideoFallbackUrl(src);
   if (fallback) {
     return (
-      // eslint-disable-next-line jsx-a11y/media-has-caption
+       
       <video ref={ref} className={className} muted loop playsInline preload="metadata">
         <source src={src} type="video/webm" />
         <source src={fallback} type="video/mp4" />
       </video>
     );
   }
-  // eslint-disable-next-line jsx-a11y/media-has-caption
+   
   return <video ref={ref} src={src} className={className} muted loop playsInline preload="metadata" />;
 }

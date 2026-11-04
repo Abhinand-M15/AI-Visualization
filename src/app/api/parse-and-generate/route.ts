@@ -1,12 +1,15 @@
 import { NextResponse } from "next/server";
-import { parseDocument } from "@/lib/parseDocument";
+import { DocumentRejectedError, parseDocument } from "@/lib/parseDocument";
 import { generateStory } from "@/lib/agent/generateStory";
-import type { DocumentType } from "@/lib/types";
+import { DOCUMENT_TYPES, type DocumentType } from "@/lib/types";
 import { getSupabase } from "@/lib/db";
-import { requireUser, unauthorizedResponse, type AppUser } from "@/lib/auth/session";
-import { getGeminiKeyFor, missingApiKeyResponse } from "@/lib/userKeys";
+import { requireUser, type AppUser } from "@/lib/auth/session";
+import { getGeminiKeyFor } from "@/lib/userKeys";
 import { logActivity } from "@/lib/activity";
 import { getDomain, type Domain } from "@/lib/domains";
+import { apiErrorResponse, HttpError } from "@/lib/server/errors";
+import { requireQuota } from "@/lib/server/quota";
+import { pathBelongsTo } from "@/app/api/logos/server";
 import { DOCUMENTS_BUCKET, MAX_UPLOAD_BYTES, UPLOAD_EXTENSIONS, UPLOAD_MIME_TYPES, uploadExtensionOf } from "../uploads/shared";
 
 // Parsing a large document plus a long Gemini generation can run for minutes;
@@ -43,27 +46,39 @@ async function resolveDomain(raw: unknown): Promise<Domain | null> {
   }
 }
 
-/** A logo path inside the caller's own folder of the company-logos bucket, else undefined. */
+/**
+ * A well-formed logo path inside the caller's own folder of the company-logos bucket, else
+ * undefined. Only echoed back; the project save verifies the object itself (SEC-07).
+ */
 function cleanLogoPath(raw: unknown, user: AppUser | null): string | undefined {
   if (typeof raw !== "string") return undefined;
   const path = raw.trim();
-  if (!path || path.length > 300 || path.includes("..") || path.startsWith("/")) return undefined;
-  return path.startsWith(`${user ? user.id : "anon"}/`) ? path : undefined;
+  return pathBelongsTo(user, path) ? path : undefined;
 }
 
-class BadRequest extends Error {
-  constructor(message: string, readonly status = 400) {
-    super(message);
+class BadRequest extends HttpError {
+  constructor(message: string, status = 400) {
+    super(status, status === 413 ? "payload_too_large" : status === 404 ? "not_found" : "bad_request", message);
   }
 }
 
+/** Multipart uploads (accounts off, or no documents bucket) are capped like direct uploads (SEC-12). */
+const MULTIPART_OVERHEAD_BYTES = 64 * 1024;
+
 async function readMultipart(request: Request): Promise<ParsedRequest> {
+  const declared = Number(request.headers.get("content-length") ?? "");
+  if (Number.isFinite(declared) && declared > MAX_UPLOAD_BYTES + MULTIPART_OVERHEAD_BYTES) {
+    throw new BadRequest(`The file is too large. The limit is ${Math.round(MAX_UPLOAD_BYTES / (1024 * 1024))} MB.`, 413);
+  }
   const formData = await request.formData();
   const file = formData.get("file");
   const apiKey = formData.get("apiKey");
   if (!(file instanceof File)) throw new BadRequest("Missing 'file' in form data.");
   if (!uploadExtensionOf(file.name)) {
     throw new BadRequest(`Unsupported file type. Accepted: ${UPLOAD_EXTENSIONS.join(", ")}`);
+  }
+  if (file.size > MAX_UPLOAD_BYTES) {
+    throw new BadRequest(`The file is too large. The limit is ${Math.round(MAX_UPLOAD_BYTES / (1024 * 1024))} MB.`, 413);
   }
   return {
     fileName: file.name,
@@ -82,8 +97,14 @@ async function readFromStorage(request: Request, user: AppUser | null): Promise<
   const storagePath = typeof body?.storagePath === "string" ? body.storagePath : "";
   const fileName = typeof body?.fileName === "string" ? body.fileName : "";
 
-  // Only ever read from the caller's own folder.
-  if (!storagePath || !storagePath.startsWith(`${user.id}/`) || storagePath.includes("..")) {
+  // Only ever read from the caller's own folder: <user id>/<uuid>-<safe file name> (see /api/uploads).
+  const prefix = `${user.id}/`;
+  if (
+    !storagePath.startsWith(prefix) ||
+    storagePath.length > 300 ||
+    !/^[0-9a-f-]{36}-[A-Za-z0-9._-]{1,120}$/.test(storagePath.slice(prefix.length)) ||
+    storagePath.includes("..")
+  ) {
     throw new BadRequest("Invalid 'storagePath'.");
   }
   const extension = uploadExtensionOf(fileName);
@@ -141,19 +162,20 @@ export async function POST(request: Request) {
           ? Number(targetChunkCountRaw)
           : undefined;
     if (targetChunkCount !== undefined && (!Number.isInteger(targetChunkCount) || targetChunkCount < 1 || targetChunkCount > 200)) {
-      return NextResponse.json({ error: "targetChunkCount must be a whole number between 1 and 200." }, { status: 400 });
+      return NextResponse.json({ error: "The number of chapters must be a whole number between 1 and 200.", code: "bad_request" }, { status: 400 });
     }
-    if (typeof documentType !== "string") {
-      return NextResponse.json({ error: "Missing 'documentType' in form data." }, { status: 400 });
+    if (typeof documentType !== "string" || !DOCUMENT_TYPES.some((type) => type.value === documentType)) {
+      return NextResponse.json({ error: "Choose a document type.", code: "bad_request" }, { status: 400 });
     }
 
     const apiKey = user ? userApiKey : parsed.clientApiKey;
+    await requireQuota(user, "generation");
 
     const documentText = await parseDocument(parsed.fileName, parsed.buffer);
 
     if (!documentText.trim()) {
       return NextResponse.json(
-        { error: "No text could be extracted from this document." },
+        { error: "No text could be extracted from this document.", code: "unsupported_file" },
         { status: 422 }
       );
     }
@@ -182,15 +204,12 @@ export async function POST(request: Request) {
       ...(logoPath ? { logoPath } : {}),
     });
   } catch (error) {
-    const handled = unauthorizedResponse(error) ?? missingApiKeyResponse(error);
-    if (handled) return handled;
-    if (error instanceof BadRequest) {
-      return NextResponse.json({ error: error.message }, { status: error.status });
+    if (error instanceof DocumentRejectedError) {
+      return NextResponse.json(
+        { error: error.message, code: error.status === 413 ? "payload_too_large" : "unsupported_file" },
+        { status: error.status }
+      );
     }
-    console.error("parse-and-generate failed:", error);
-    return NextResponse.json(
-      { error: error instanceof Error ? error.message : "Unexpected error" },
-      { status: 500 }
-    );
+    return apiErrorResponse(error, "parse-and-generate");
   }
 }

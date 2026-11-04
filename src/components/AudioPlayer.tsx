@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useRef, useState } from "react";
 
 function formatTime(seconds: number): string {
   if (!Number.isFinite(seconds) || seconds < 0) return "0:00";
@@ -16,18 +16,13 @@ function formatTime(seconds: number): string {
  * own theme (always the same light-grey bar) regardless of our light/dark
  * palette, so the play/pause affordance disappears against a dark card —
  * this wraps a hidden <audio> element with a themed button + seek bar instead.
+ * Render it with key={src} so a new recording starts from a fresh state.
  */
 export function AudioPlayer({ src }: { src: string }) {
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const [playing, setPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
-
-  useEffect(() => {
-    setPlaying(false);
-    setCurrentTime(0);
-    setDuration(0);
-  }, [src]);
 
   function togglePlay() {
     const audio = audioRef.current;
@@ -83,10 +78,10 @@ export function AudioPlayer({ src }: { src: string }) {
         value={Math.min(currentTime, duration || 0)}
         onChange={(event) => seek(Number(event.target.value))}
         className="h-1.5 flex-1 cursor-pointer accent-violet-500"
-        aria-label="Seek"
+        aria-label="Narration position"
       />
 
-      <span className="shrink-0 whitespace-nowrap text-right text-xs tabular-nums text-neutral-500 dark:text-indigo-200/60">
+      <span className="shrink-0 whitespace-nowrap text-right text-xs tabular-nums text-muted-foreground">
         {formatTime(currentTime)} / {formatTime(duration)}
       </span>
     </div>

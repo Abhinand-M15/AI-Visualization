@@ -2,14 +2,18 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useEffect, useState } from "react";
+import { useEffect, useId, useRef, useState, type DragEvent } from "react";
 import { useDraftStore } from "@/lib/store";
 import { DOCUMENT_TYPES, type DocumentType } from "@/lib/types";
+import { formatDate } from "@/lib/projects";
+import { plural } from "@/lib/contentVersion";
 import { SpaceBackdrop } from "@/components/SpaceBackdrop";
 import { LoadingBar } from "@/components/LoadingBar";
-import { UPLOAD_EXTENSIONS } from "@/app/api/uploads/shared";
-import { useApiKeyGate } from "@/app/settings/useApiKeyGate";
+import { MAX_UPLOAD_BYTES, UPLOAD_EXTENSIONS } from "@/app/api/uploads/shared";
 import LogoUpload from "@/components/LogoUpload";
+import { Button, cardClass, fieldClass, pageSubtitleClass, pageTitleClass } from "@/components/ui/button";
+import { ErrorState } from "@/components/StateViews";
+import { useUnsavedChangesWarning } from "@/components/useUnsavedChangesWarning";
 
 interface DomainOption {
   id: string;
@@ -17,19 +21,77 @@ interface DomainOption {
   name: string;
 }
 
+/** One line per document type so "BRD" and the fixed case-study layout are explained (UX-13). */
+const TYPE_DESCRIPTIONS: Record<DocumentType, string> = {
+  "case-study": "A client success story, laid out in fixed sections: Company, Domain, Customer, Problem, Solution, Impact.",
+  brd: "A business requirements document, told as chapters that walk through the requirements.",
+  other: "Any other document, told as chapters that follow its own structure.",
+};
+
+const MAX_UPLOAD_MB = Math.round(MAX_UPLOAD_BYTES / (1024 * 1024));
+const ACCEPTED_LABEL = UPLOAD_EXTENSIONS.map((ext) => ext.replace(".", "").toUpperCase()).join(", ");
+
+function formatBytes(bytes: number): string {
+  if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  return `${Math.max(1, Math.round(bytes / 1024))} KB`;
+}
+
+function formatElapsed(ms: number): string {
+  const seconds = Math.max(0, Math.floor(ms / 1000));
+  return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
+}
+
+/** Problem with a picked file, checked before uploading; null when it's fine. */
+function fileProblem(file: File): string | null {
+  const extension = file.name.includes(".") ? `.${file.name.split(".").pop()!.toLowerCase()}` : "";
+  if (!UPLOAD_EXTENSIONS.includes(extension)) return `This file type isn't supported. Use ${ACCEPTED_LABEL}.`;
+  if (file.size > MAX_UPLOAD_BYTES) return `This file is ${formatBytes(file.size)}. The limit is ${MAX_UPLOAD_MB} MB.`;
+  return null;
+}
+
 export default function NewStoryPage() {
   const router = useRouter();
-  const { storyline, status, errorMessage, errorCode, generate, editChunk, revise, save, reset } = useDraftStore();
-  useApiKeyGate();
+  const {
+    storyline,
+    status,
+    errorMessage,
+    errorCode,
+    actionError,
+    lastFeedback,
+    generateStage,
+    generateStartedAt,
+    savedAt,
+    restored,
+    notice,
+    generate,
+    cancelGenerate,
+    editChunk,
+    revise,
+    save,
+    dismissActionError,
+    reset,
+  } = useDraftStore();
+  const fileInputId = useId();
+  const countId = useId();
+  const feedbackId = useId();
 
   const [documentType, setDocumentType] = useState<DocumentType>("case-study");
   const [file, setFile] = useState<File | null>(null);
+  const [fileError, setFileError] = useState<string | null>(null);
+  const [dragging, setDragging] = useState(false);
   const [feedbackText, setFeedbackText] = useState("");
   const [targetChunkCount, setTargetChunkCount] = useState("");
   // Optional industry domain; the dropdown stays hidden when none are available.
   const [domains, setDomains] = useState<DomainOption[]>([]);
   const [domainId, setDomainId] = useState("");
   const [logoPath, setLogoPath] = useState<string | null>(null);
+  const [now, setNow] = useState(() => Date.now());
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+
+  // Bring back a draft kept from an earlier visit (reload, closed tab).
+  useEffect(() => {
+    void useDraftStore.persist.rehydrate();
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -46,7 +108,34 @@ export default function NewStoryPage() {
     };
   }, []);
 
+  // Elapsed time while generating (an honest clock, not a fake percentage).
+  useEffect(() => {
+    if (status !== "generating") return;
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [status]);
+
   const isBusy = status === "generating" || status === "revising" || status === "saving";
+  const hasDraft = Boolean(storyline) && (status === "reviewing" || status === "revising" || status === "saving");
+
+  useUnsavedChangesWarning(
+    status === "generating" || hasDraft,
+    status === "generating"
+      ? "Leave this page? The story being generated will be lost."
+      : "Leave without saving? Your draft stays on this device and comes back when you open New story again."
+  );
+
+  function pickFile(next: File | null) {
+    setFileError(next ? fileProblem(next) : null);
+    setFile(next && !fileProblem(next) ? next : null);
+  }
+
+  function onDrop(event: DragEvent<HTMLLabelElement>) {
+    event.preventDefault();
+    setDragging(false);
+    if (isBusy) return;
+    pickFile(event.dataTransfer.files?.[0] ?? null);
+  }
 
   async function handleGenerate() {
     if (!file) return;
@@ -65,219 +154,353 @@ export default function NewStoryPage() {
     }
   }
 
+  function startOver() {
+    if (hasDraft && !window.confirm("Start over? The generated draft and your edits on this page are deleted.")) return;
+    reset();
+    setFeedbackText("");
+  }
+
+  const elapsed = generateStartedAt ? formatElapsed(now - generateStartedAt) : undefined;
+
   return (
     <>
       <SpaceBackdrop />
       <main className="flex w-full flex-1 flex-col text-neutral-900 dark:text-white">
-        <div className="mx-auto flex w-full max-w-6xl flex-col gap-10 px-6 py-20 lg:px-12">
-      <header>
-        <h1 className="text-5xl font-semibold tracking-tight md:text-6xl">New story</h1>
-        <p className="mt-4 text-xl text-neutral-500 dark:text-indigo-200/70">
-          Upload a document and let the agent turn it into a chunked, narrated story.
-        </p>
-      </header>
-
-      {(status === "idle" || status === "generating") && (
-        <section className="flex max-w-2xl flex-col gap-8 rounded-3xl border border-neutral-200 bg-white p-8 shadow-sm dark:border-white/10 dark:bg-white/[0.03] dark:shadow-[0_0_60px_rgba(99,102,241,0.08)] dark:backdrop-blur-sm">
+        <div className="mx-auto flex w-full max-w-5xl flex-col gap-8 px-4 pb-20 pt-2 sm:px-6 lg:px-8">
           <div>
-            <label className="mb-3 block text-lg font-medium text-neutral-700 dark:text-indigo-100">
-              Document type
-            </label>
-            <div className="flex flex-wrap gap-3">
-              {DOCUMENT_TYPES.map((option) => (
-                <button
-                  key={option.value}
-                  type="button"
-                  onClick={() => setDocumentType(option.value)}
+            <Link
+              href="/"
+              className="inline-flex items-center gap-1 rounded text-sm text-muted-foreground hover:text-neutral-900 dark:hover:text-white"
+            >
+              <span aria-hidden>←</span> My stories
+            </Link>
+          </div>
+          <header>
+            <h1 className={pageTitleClass}>New story</h1>
+            <p className={`mt-2 ${pageSubtitleClass}`}>
+              Upload a document and the agent turns it into a narrated story told in chapters.
+            </p>
+          </header>
+
+          {restored && hasDraft && (
+            <div
+              role="status"
+              className="flex flex-col gap-2 rounded-2xl border border-violet-300 bg-violet-50 px-4 py-3 text-sm text-violet-900 dark:border-violet-400/30 dark:bg-violet-500/10 dark:text-violet-100 sm:flex-row sm:items-center sm:justify-between"
+            >
+              <span>
+                We kept your unsaved draft{savedAt ? ` from ${formatDate(savedAt, true)}` : ""}. Save it to keep it as a
+                story.
+              </span>
+              <Button variant="ghost" size="xs" onClick={startOver}>
+                Discard draft
+              </Button>
+            </div>
+          )}
+
+          {(status === "idle" || status === "generating") && (
+            <section
+              aria-labelledby="upload-heading"
+              className={`${cardClass} flex max-w-2xl flex-col gap-7 p-5 sm:p-8`}
+            >
+              <h2 id="upload-heading" className="sr-only">
+                Upload a document
+              </h2>
+              {notice && status === "idle" && (
+                <p role="status" className="rounded-xl bg-neutral-100 px-3 py-2 text-sm text-neutral-700 dark:bg-white/5 dark:text-indigo-100">
+                  {notice}
+                </p>
+              )}
+
+              <fieldset disabled={isBusy} className="flex flex-col gap-3">
+                <legend className="mb-3 text-sm font-semibold text-neutral-800 dark:text-indigo-100">Document type</legend>
+                <div className="grid gap-2 sm:grid-cols-3">
+                  {DOCUMENT_TYPES.map((option) => {
+                    const checked = documentType === option.value;
+                    return (
+                      <label
+                        key={option.value}
+                        className={`flex cursor-pointer flex-col gap-1 rounded-xl border p-3 text-sm transition-colors has-[:focus-visible]:outline has-[:focus-visible]:outline-2 has-[:focus-visible]:outline-offset-2 has-[:focus-visible]:outline-ring ${
+                          checked
+                            ? "border-violet-500 bg-violet-50 dark:border-violet-400/70 dark:bg-violet-500/10"
+                            : "border-neutral-300 bg-white hover:bg-neutral-50 dark:border-white/15 dark:bg-white/5 dark:hover:bg-white/10"
+                        }`}
+                      >
+                        <span className="flex items-center gap-2 font-semibold">
+                          <input
+                            type="radio"
+                            name="document-type"
+                            value={option.value}
+                            checked={checked}
+                            onChange={() => setDocumentType(option.value)}
+                            className="accent-violet-600"
+                          />
+                          {option.label}
+                        </span>
+                        <span className="text-xs text-muted-foreground">{TYPE_DESCRIPTIONS[option.value]}</span>
+                      </label>
+                    );
+                  })}
+                </div>
+              </fieldset>
+
+              <div className="flex flex-col gap-2">
+                <span className="text-sm font-semibold text-neutral-800 dark:text-indigo-100" id={`${fileInputId}-label`}>
+                  Document
+                </span>
+                <input
+                  ref={fileInputRef}
+                  id={fileInputId}
+                  type="file"
+                  accept={UPLOAD_EXTENSIONS.join(",")}
                   disabled={isBusy}
-                  className={`rounded-full px-5 py-2.5 text-lg font-medium transition-all ${
-                    documentType === option.value
-                      ? "bg-gradient-to-r from-violet-500 to-cyan-400 text-neutral-950 shadow-[0_0_24px_rgba(139,92,246,0.5)]"
-                      : "border border-neutral-200 bg-neutral-50 text-neutral-600 hover:bg-neutral-100 dark:border-white/10 dark:bg-white/5 dark:text-indigo-100/70 dark:hover:bg-white/10"
+                  aria-labelledby={`${fileInputId}-label ${fileInputId}-zone`}
+                  aria-describedby={`${fileInputId}-hint`}
+                  onChange={(event) => pickFile(event.target.files?.[0] ?? null)}
+                  className="peer sr-only"
+                />
+                <label
+                  id={`${fileInputId}-zone`}
+                  htmlFor={fileInputId}
+                  onDragOver={(event) => {
+                    event.preventDefault();
+                    if (!isBusy) setDragging(true);
+                  }}
+                  onDragLeave={() => setDragging(false)}
+                  onDrop={onDrop}
+                  className={`flex min-w-0 cursor-pointer flex-col items-center gap-1 rounded-xl border-2 border-dashed px-4 py-6 text-center text-sm transition-colors peer-focus-visible:outline peer-focus-visible:outline-2 peer-focus-visible:outline-offset-2 peer-focus-visible:outline-ring peer-disabled:cursor-not-allowed peer-disabled:opacity-60 ${
+                    dragging
+                      ? "border-violet-500 bg-violet-50 dark:bg-violet-500/10"
+                      : "border-neutral-300 bg-neutral-50 hover:bg-neutral-100 dark:border-white/20 dark:bg-white/[0.02] dark:hover:bg-white/5"
                   }`}
                 >
-                  {option.label}
-                </button>
-              ))}
-            </div>
-          </div>
+                  {file ? (
+                    <>
+                      <span className="max-w-full truncate font-medium text-neutral-900 dark:text-white" title={file.name}>
+                        {file.name}
+                      </span>
+                      <span className="text-xs text-muted-foreground">
+                        {formatBytes(file.size)} · click or drop another file to replace it
+                      </span>
+                    </>
+                  ) : (
+                    <>
+                      <span className="font-medium text-neutral-900 dark:text-white">Choose a file or drop it here</span>
+                      <span className="text-xs text-muted-foreground">No file chosen yet</span>
+                    </>
+                  )}
+                </label>
+                <p id={`${fileInputId}-hint`} className="text-xs text-muted-foreground">
+                  {ACCEPTED_LABEL}, up to {MAX_UPLOAD_MB} MB.
+                </p>
+                {fileError && (
+                  <p role="alert" className="text-xs text-red-700 dark:text-red-300">
+                    {fileError}
+                  </p>
+                )}
+              </div>
 
-          <div>
-            <label className="mb-3 block text-lg font-medium text-neutral-700 dark:text-indigo-100">
-              Document
-            </label>
-            <input
-              type="file"
-              accept={UPLOAD_EXTENSIONS.join(",")}
-              disabled={isBusy}
-              onChange={(event) => setFile(event.target.files?.[0] ?? null)}
-              className="block w-full cursor-pointer rounded-xl border border-dashed border-neutral-300 bg-neutral-50 p-5 text-lg text-neutral-600 file:mr-4 file:cursor-pointer file:rounded-full file:border-0 file:bg-neutral-200 file:px-5 file:py-2.5 file:text-lg file:font-medium file:text-neutral-800 dark:border-white/20 dark:bg-white/[0.02] dark:text-indigo-100/80 dark:file:bg-white/10 dark:file:text-white"
-            />
-            <p className="mt-3 text-base text-neutral-500 dark:text-indigo-200/50">
-              Accepted: PDF, PPTX, XLSX, DOCX, TXT, MD.
-            </p>
-          </div>
+              <div className="flex flex-col gap-2">
+                <label htmlFor={countId} className="text-sm font-semibold text-neutral-800 dark:text-indigo-100">
+                  Number of chapters <span className="font-normal text-muted-foreground">(optional)</span>
+                </label>
+                <input
+                  id={countId}
+                  type="number"
+                  min={1}
+                  max={200}
+                  step={1}
+                  inputMode="numeric"
+                  disabled={isBusy}
+                  value={targetChunkCount}
+                  onChange={(event) => setTargetChunkCount(event.target.value)}
+                  placeholder="Auto"
+                  aria-describedby={`${countId}-hint`}
+                  className={`${fieldClass} sm:w-40`}
+                />
+                <p id={`${countId}-hint`} className="text-xs text-muted-foreground">
+                  Leave blank to let the agent decide from the document. If there are more topics than chapters, related
+                  ones are grouped together rather than dropped.
+                </p>
+              </div>
 
-          <div>
-            <label className="mb-3 block text-lg font-medium text-neutral-700 dark:text-indigo-100">
-              Number of chunks
-            </label>
-            <input
-              type="number"
-              min={1}
-              max={200}
-              step={1}
-              inputMode="numeric"
-              disabled={isBusy}
-              value={targetChunkCount}
-              onChange={(event) => setTargetChunkCount(event.target.value)}
-              placeholder="Let the AI decide"
-              className="w-40 rounded-xl border border-neutral-200 bg-neutral-50 px-4 py-3 text-lg text-neutral-900 placeholder:text-neutral-400 focus:border-violet-400 focus:outline-none dark:border-white/10 dark:bg-black/30 dark:text-white dark:placeholder:text-indigo-200/30 dark:focus:border-violet-400/60"
-            />
-            <p className="mt-3 text-base text-neutral-500 dark:text-indigo-200/50">
-              How many sections the generated site should have. Leave blank to let the agent decide from the
-              document&apos;s own content. If the document has more distinct scenarios than this number, related
-              ones are grouped together rather than dropped.
-            </p>
-          </div>
+              {domains.length > 0 && (
+                <div className="flex flex-col gap-2">
+                  <label htmlFor="story-domain" className="text-sm font-semibold text-neutral-800 dark:text-indigo-100">
+                    Industry <span className="font-normal text-muted-foreground">(optional)</span>
+                  </label>
+                  <select
+                    id="story-domain"
+                    value={domainId}
+                    disabled={isBusy}
+                    onChange={(event) => setDomainId(event.target.value)}
+                    aria-describedby="story-domain-hint"
+                    className={`${fieldClass} sm:max-w-sm`}
+                  >
+                    <option value="">No specific industry</option>
+                    {domains.map((domain) => (
+                      <option key={domain.id} value={domain.id}>
+                        {domain.name}
+                      </option>
+                    ))}
+                  </select>
+                  <p id="story-domain-hint" className="text-xs text-muted-foreground">
+                    The story uses this industry&apos;s wording, and its avatars and scene images follow it.
+                  </p>
+                </div>
+              )}
 
-          {domains.length > 0 && (
-            <div>
-              <label htmlFor="story-domain" className="mb-3 block text-lg font-medium text-neutral-700 dark:text-indigo-100">
-                Domain (optional)
-              </label>
-              <select
-                id="story-domain"
-                value={domainId}
-                disabled={isBusy}
-                onChange={(event) => setDomainId(event.target.value)}
-                className="w-full max-w-sm rounded-xl border border-neutral-200 bg-neutral-50 px-4 py-3 text-lg text-neutral-900 focus:border-violet-400 focus:outline-none dark:border-white/10 dark:bg-black/30 dark:text-white dark:focus:border-violet-400/60"
-              >
-                <option value="">No specific domain</option>
-                {domains.map((domain) => (
-                  <option key={domain.id} value={domain.id}>
-                    {domain.name}
-                  </option>
-                ))}
-              </select>
-              <p className="mt-3 text-base text-neutral-500 dark:text-indigo-200/50">
-                The story uses this industry&apos;s wording, and its avatars and scene images follow it.
-              </p>
-            </div>
-          )}
+              <LogoUpload value={logoPath} onChange={setLogoPath} />
 
-          <LogoUpload value={logoPath} onChange={setLogoPath} />
-
-          <button
-            type="button"
-            onClick={handleGenerate}
-            disabled={!file || isBusy}
-            className="self-start rounded-full bg-gradient-to-r from-violet-500 to-cyan-400 px-7 py-3.5 text-lg font-semibold text-neutral-950 shadow-[0_0_30px_rgba(139,92,246,0.45)] transition-opacity disabled:opacity-30"
-          >
-            {status === "generating" ? "Generating story…" : "Generate story"}
-          </button>
-          {status === "generating" && <LoadingBar label="Reading the document and building the storyline…" />}
-        </section>
-      )}
-
-      {status === "error" && (
-        <section className="rounded-3xl border border-red-300 bg-red-50 p-6 text-lg text-red-700 dark:border-red-500/30 dark:bg-red-500/10 dark:text-red-200">
-          <p className="text-xl font-medium">Something went wrong</p>
-          <p className="mt-2">{errorMessage}</p>
-          {errorCode === "missing_api_key" && (
-            <Link
-              href="/settings?onboarding=1"
-              className="mt-4 mr-3 inline-block rounded-full border border-red-300 px-5 py-2.5 text-base font-medium dark:border-red-400/40"
-            >
-              Open Settings
-            </Link>
-          )}
-          <button
-            type="button"
-            onClick={reset}
-            className="mt-4 rounded-full bg-red-600 px-5 py-2.5 text-base font-medium text-white dark:bg-red-500"
-          >
-            Start over
-          </button>
-        </section>
-      )}
-
-      {storyline && (status === "reviewing" || status === "revising" || status === "saving") && (
-        <section className="flex flex-col gap-8">
-          <div>
-            <h2 className="text-4xl font-semibold tracking-tight">{storyline.title}</h2>
-            <p className="mt-1 text-lg text-neutral-500 dark:text-indigo-200/60">
-              {storyline.chunks.length} chunks
-            </p>
-          </div>
-
-          <div className="grid grid-cols-1 gap-5 lg:grid-cols-2">
-            {storyline.chunks.map((chunk) => (
-              <div
-                key={chunk.id}
-                className="rounded-2xl border border-neutral-200 bg-white p-5 shadow-sm dark:border-white/10 dark:bg-white/[0.03] dark:shadow-[0_0_40px_rgba(99,102,241,0.06)] dark:backdrop-blur-sm"
-              >
-                <div className="mb-3 flex items-center justify-between">
-                  <span className="text-base font-medium text-cyan-700 dark:text-cyan-300/70">
-                    Chunk {chunk.order}
-                  </span>
-                  {chunk.userEdited && (
-                    <span className="rounded-full bg-amber-100 px-3 py-1 text-sm font-medium text-amber-700 dark:bg-amber-400/15 dark:text-amber-300">
-                      edited
-                    </span>
+              <div className="flex flex-col gap-3 border-t border-neutral-200 pt-5 dark:border-white/10">
+                <div className="flex flex-wrap items-center gap-3">
+                  <Button variant="primary" size="lg" onClick={handleGenerate} disabled={!file || isBusy}>
+                    {status === "generating" ? "Generating story…" : "Generate story"}
+                  </Button>
+                  {status === "generating" && (
+                    <Button variant="secondary" size="sm" onClick={cancelGenerate}>
+                      Cancel
+                    </Button>
                   )}
                 </div>
-                <input
-                  value={chunk.title}
-                  onChange={(event) => editChunk(chunk.id, { title: event.target.value })}
-                  disabled={isBusy}
-                  className="mb-3 w-full rounded-xl border border-neutral-200 bg-neutral-50 px-4 py-3 text-lg font-medium text-neutral-900 focus:border-violet-400 focus:outline-none dark:border-white/10 dark:bg-black/30 dark:text-white dark:focus:border-violet-400/60"
-                />
-                <textarea
-                  value={chunk.narrativeText}
-                  onChange={(event) => editChunk(chunk.id, { narrativeText: event.target.value })}
-                  disabled={isBusy}
-                  rows={3}
-                  className="w-full rounded-xl border border-neutral-200 bg-neutral-50 px-4 py-3 text-lg text-neutral-700 focus:border-violet-400 focus:outline-none dark:border-white/10 dark:bg-black/30 dark:text-indigo-100/90 dark:focus:border-violet-400/60"
-                />
+                {status === "generating" ? (
+                  <>
+                    <LoadingBar
+                      label={
+                        generateStage === "uploading"
+                          ? "Uploading the document…"
+                          : "Reading the document and writing the chapters…"
+                      }
+                      detail={elapsed}
+                    />
+                    <p className="text-xs text-muted-foreground">
+                      This usually takes 1 to 3 minutes (at most 5). Keep this tab open until it finishes.
+                    </p>
+                  </>
+                ) : (
+                  <p className="text-xs text-muted-foreground">
+                    Generating usually takes 1 to 3 minutes. Nothing is saved until you review the draft and click Save.
+                  </p>
+                )}
               </div>
-            ))}
-          </div>
+            </section>
+          )}
 
-          <div className="rounded-2xl border border-neutral-200 bg-white p-6 dark:border-white/10 dark:bg-white/[0.03] dark:backdrop-blur-sm">
-            <label className="mb-3 block text-lg font-medium text-neutral-700 dark:text-indigo-100">
-              Feedback for regeneration (optional)
-            </label>
-            <textarea
-              value={feedbackText}
-              onChange={(event) => setFeedbackText(event.target.value)}
-              disabled={isBusy}
-              rows={2}
-              placeholder='e.g. "make chunk 3 more concise" — chunks marked "edited" are always preserved as-is.'
-              className="w-full rounded-xl border border-neutral-200 bg-neutral-50 px-4 py-3 text-lg text-neutral-900 placeholder:text-neutral-400 focus:border-violet-400 focus:outline-none dark:border-white/10 dark:bg-black/30 dark:text-white dark:placeholder:text-indigo-200/30 dark:focus:border-violet-400/60"
-            />
-            <div className="mt-4 flex gap-4">
-              <button
-                type="button"
-                onClick={() => revise(feedbackText)}
-                disabled={isBusy}
-                className="rounded-full border border-neutral-200 bg-neutral-50 px-6 py-3 text-lg font-medium text-neutral-700 transition-colors hover:bg-neutral-100 disabled:opacity-30 dark:border-white/10 dark:bg-white/5 dark:text-indigo-100 dark:hover:bg-white/10"
-              >
-                {status === "revising" ? "Regenerating…" : "Regenerate"}
-              </button>
-              <button
-                type="button"
-                onClick={handleSave}
-                disabled={isBusy}
-                className="rounded-full bg-gradient-to-r from-violet-500 to-cyan-400 px-6 py-3 text-lg font-semibold text-neutral-950 shadow-[0_0_30px_rgba(139,92,246,0.45)] disabled:opacity-30"
-              >
-                {status === "saving" ? "Saving…" : "Save project"}
-              </button>
-            </div>
-            {status === "revising" && <LoadingBar label="Regenerating storyline…" />}
-          </div>
-        </section>
-      )}
+          {status === "error" && (
+            <ErrorState
+              title="The story couldn't be generated"
+              message={errorMessage ?? "Something went wrong. Try again."}
+              code={errorCode}
+              onRetry={file ? () => void handleGenerate() : undefined}
+            >
+              <Button variant="ghost" size="sm" onClick={startOver}>
+                Start over
+              </Button>
+            </ErrorState>
+          )}
+
+          {storyline && hasDraft && (
+            <section aria-labelledby="draft-heading" className="flex flex-col gap-6">
+              <div>
+                <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Draft, not saved yet</p>
+                <h2 id="draft-heading" className="mt-1 break-words text-2xl font-semibold tracking-tight">
+                  {storyline.title}
+                </h2>
+                <p className="mt-1 text-sm text-muted-foreground">
+                  {plural(storyline.chunks.length, "chapter")}. Edit any chapter below, ask for changes, then save.
+                </p>
+              </div>
+
+              <ol className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+                {storyline.chunks.map((chunk) => (
+                  <li key={chunk.id} className={`${cardClass} flex flex-col gap-2 p-4`}>
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-xs font-semibold uppercase tracking-wide text-cyan-800 dark:text-cyan-300">
+                        Chapter {chunk.order}
+                      </span>
+                      {chunk.userEdited && (
+                        <span className="rounded-full bg-amber-100 px-2.5 py-0.5 text-xs font-medium text-amber-800 dark:bg-amber-400/15 dark:text-amber-200">
+                          Edited
+                        </span>
+                      )}
+                    </div>
+                    <label className="sr-only" htmlFor={`draft-title-${chunk.id}`}>
+                      Chapter {chunk.order} title
+                    </label>
+                    <input
+                      id={`draft-title-${chunk.id}`}
+                      value={chunk.title}
+                      onChange={(event) => editChunk(chunk.id, { title: event.target.value })}
+                      disabled={isBusy}
+                      className={`${fieldClass} font-medium`}
+                    />
+                    <label className="sr-only" htmlFor={`draft-text-${chunk.id}`}>
+                      Chapter {chunk.order} narration text
+                    </label>
+                    <textarea
+                      id={`draft-text-${chunk.id}`}
+                      value={chunk.narrativeText}
+                      onChange={(event) => editChunk(chunk.id, { narrativeText: event.target.value })}
+                      disabled={isBusy}
+                      rows={4}
+                      className={`${fieldClass} leading-relaxed`}
+                    />
+                  </li>
+                ))}
+              </ol>
+
+              <div className={`${cardClass} flex flex-col gap-3 p-5`}>
+                <label htmlFor={feedbackId} className="text-sm font-semibold text-neutral-800 dark:text-indigo-100">
+                  Ask for changes <span className="font-normal text-muted-foreground">(optional)</span>
+                </label>
+                <textarea
+                  id={feedbackId}
+                  value={feedbackText}
+                  onChange={(event) => setFeedbackText(event.target.value)}
+                  disabled={isBusy}
+                  rows={2}
+                  placeholder='For example: "make chapter 3 more concise"'
+                  aria-describedby={`${feedbackId}-hint`}
+                  className={fieldClass}
+                />
+                <p id={`${feedbackId}-hint`} className="text-xs text-muted-foreground">
+                  Chapters marked Edited are always kept exactly as you wrote them.
+                </p>
+
+                {actionError && (
+                  <ErrorState
+                    compact
+                    message={
+                      actionError.action === "save"
+                        ? `Not saved: ${actionError.message} Your draft is still here.`
+                        : `${actionError.message} Your draft is unchanged.`
+                    }
+                    code={actionError.code}
+                    onRetry={() =>
+                      actionError.action === "save" ? void handleSave() : void revise(lastFeedback ?? feedbackText)
+                    }
+                  >
+                    <Button variant="ghost" size="xs" onClick={dismissActionError}>
+                      Dismiss
+                    </Button>
+                  </ErrorState>
+                )}
+
+                <div className="flex flex-wrap items-center gap-3">
+                  <Button variant="primary" size="md" onClick={handleSave} disabled={isBusy}>
+                    {status === "saving" ? "Saving…" : "Save story"}
+                  </Button>
+                  <Button variant="secondary" size="md" onClick={() => revise(feedbackText)} disabled={isBusy}>
+                    {status === "revising" ? "Regenerating…" : feedbackText.trim() ? "Regenerate with changes" : "Regenerate"}
+                  </Button>
+                  <Button variant="ghost" size="sm" onClick={startOver} disabled={isBusy} className="sm:ml-auto">
+                    Start over
+                  </Button>
+                </div>
+                {status === "revising" && <LoadingBar label="Regenerating the chapters…" />}
+              </div>
+            </section>
+          )}
+
         </div>
       </main>
     </>

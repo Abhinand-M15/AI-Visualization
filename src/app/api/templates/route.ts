@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
-import { requireUser, unauthorizedResponse } from "@/lib/auth/session";
+import { apiErrorResponse } from "@/lib/server/errors";
+import { requireUser } from "@/lib/auth/session";
 import { listTemplates } from "@/lib/templates";
 
 /**
@@ -14,8 +15,6 @@ export async function GET() {
     await requireUser();
     return NextResponse.json({ templates: listTemplates() });
   } catch (error) {
-    const unauthorized = unauthorizedResponse(error);
-    if (unauthorized) return unauthorized;
-    return NextResponse.json({ error: "Could not load templates." }, { status: 500 });
+    return apiErrorResponse(error, "list templates");
   }
 }

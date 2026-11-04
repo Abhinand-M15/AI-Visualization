@@ -1,7 +1,8 @@
 import { NextResponse } from "next/server";
 import { getSupabase } from "@/lib/db";
-import { requireUser, unauthorizedResponse, type AppUser } from "@/lib/auth/session";
-import { missingApiKeyResponse } from "@/lib/userKeys";
+import { requireUser, type AppUser } from "@/lib/auth/session";
+import { apiErrorResponse } from "@/lib/server/errors";
+import { requireQuota } from "@/lib/server/quota";
 import { logActivity } from "@/lib/activity";
 import { fillPrompt, getDomain, getPrompt, type Domain } from "@/lib/domains";
 import { getImageGeneratorFor, type ImageGenerator } from "@/lib/imageGen/types";
@@ -150,60 +151,78 @@ async function generateOne(opts: {
   }
 }
 
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * The domain's avatars, generating missing ones when `generate` is true.
+ * Generation spends the shared image allowance, so it counts against the user's
+ * daily image quota (SEC-11).
+ */
+async function avatarsFor(id: string, user: AppUser | null, generate: boolean, retry: boolean): Promise<Response> {
+  const domain = UUID_PATTERN.test(id) || /^[a-z0-9-]{1,64}$/.test(id) ? await getDomain(id) : null;
+  if (!domain) return NextResponse.json({ avatars: [] });
+
+  let rows = await readRows(domain.id);
+  if (rows === null) return NextResponse.json({ avatars: [] });
+
+  if (generate) {
+    const todo = GENDERS.filter((gender) => {
+      const row = rows!.find((r) => r.gender === gender);
+      if (!row) return true;
+      if (row.status === "ready") return false;
+      if (row.status === "failed") return retry;
+      return Date.now() - new Date(row.created_at).getTime() >= PENDING_FRESH_MS;
+    });
+
+    const template = todo.length > 0 ? await getPrompt("avatar_character") : null;
+    if (todo.length > 0 && template) {
+      // Throws MissingApiKeyError / QuotaExceededError before anything is claimed, so no stuck rows are left behind.
+      const generator = await getImageGeneratorFor(user);
+      await requireQuota(user, "image", todo.length);
+      const jobs: Promise<void>[] = [];
+      for (const gender of todo) {
+        const existing = rows.find((r) => r.gender === gender);
+        const rowId = await claim(domain.id, gender, existing, retry);
+        if (!rowId) continue;
+        const prompt = fillPrompt(template, {
+          gender,
+          domain_name: domain.name,
+          outfit_description: domain.outfitDescription,
+        });
+        jobs.push(generateOne({ user, domain, gender, rowId, prompt, generator }));
+      }
+      await Promise.all(jobs);
+      rows = (await readRows(domain.id)) ?? [];
+    }
+  }
+
+  return NextResponse.json({ avatars: rows.map(toDto) });
+}
+
+/**
+ * GET ?generate=0 -> the avatars, read only.
+ * GET (default)   -> also generates missing ones (kept for the current picker; prefer POST).
+ * GET ?retry=1    -> also retries failed ones.
+ */
 export async function GET(request: Request, context: { params: Promise<{ id: string }> }) {
   try {
     const user = await requireUser();
     const { id } = await context.params;
     const url = new URL(request.url);
-    const generate = url.searchParams.get("generate") !== "0";
-    const retry = url.searchParams.get("retry") === "1";
-
-    const domain = await getDomain(id);
-    if (!domain) return NextResponse.json({ avatars: [] });
-
-    let rows = await readRows(domain.id);
-    if (rows === null) return NextResponse.json({ avatars: [] });
-
-    if (generate) {
-      const todo = GENDERS.filter((gender) => {
-        const row = rows!.find((r) => r.gender === gender);
-        if (!row) return true;
-        if (row.status === "ready") return false;
-        if (row.status === "failed") return retry;
-        return Date.now() - new Date(row.created_at).getTime() >= PENDING_FRESH_MS;
-      });
-
-      const template = todo.length > 0 ? await getPrompt("avatar_character") : null;
-      if (todo.length > 0 && template) {
-        // Throws MissingApiKeyError before anything is claimed, so no stuck rows are left behind.
-        const generator = await getImageGeneratorFor(user);
-        const jobs: Promise<void>[] = [];
-        for (const gender of todo) {
-          const existing = rows.find((r) => r.gender === gender);
-          const rowId = await claim(domain.id, gender, existing, retry);
-          if (!rowId) continue;
-          const prompt = fillPrompt(template, {
-            gender,
-            domain_name: domain.name,
-            outfit_description: domain.outfitDescription,
-          });
-          jobs.push(generateOne({ user, domain, gender, rowId, prompt, generator }));
-        }
-        await Promise.all(jobs);
-        rows = (await readRows(domain.id)) ?? [];
-      }
-    }
-
-    return NextResponse.json({ avatars: rows.map(toDto) });
+    return await avatarsFor(id, user, url.searchParams.get("generate") !== "0", url.searchParams.get("retry") === "1");
   } catch (error) {
-    const unauthorized = unauthorizedResponse(error);
-    if (unauthorized) return unauthorized;
-    const missingKey = missingApiKeyResponse(error);
-    if (missingKey) return missingKey;
-    console.error("domain avatars failed:", error);
-    return NextResponse.json(
-      { error: error instanceof Error ? error.message : "Unexpected error" },
-      { status: 500 }
-    );
+    return apiErrorResponse(error, "domain avatars");
+  }
+}
+
+/** POST { retry?: boolean } -> generates missing (and with retry, failed) avatars, then returns them. */
+export async function POST(request: Request, context: { params: Promise<{ id: string }> }) {
+  try {
+    const user = await requireUser();
+    const { id } = await context.params;
+    const body = (await request.json().catch(() => null)) as { retry?: unknown } | null;
+    return await avatarsFor(id, user, true, body?.retry === true);
+  } catch (error) {
+    return apiErrorResponse(error, "domain avatars");
   }
 }

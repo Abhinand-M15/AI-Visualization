@@ -45,7 +45,7 @@ export async function getImageGeneratorFor(user: AppUser | null): Promise<ImageG
   }
   if (!user) {
     const envKey = process.env.GEMINI_API_KEY?.trim();
-    if (!envKey) throw new MissingApiKeyError("GEMINI_API_KEY is not set on the server, so images cannot be generated.");
+    if (!envKey) throw new MissingApiKeyError("No Gemini key is set up on this server, so images cannot be generated.");
     return createGeminiImageGenerator(envKey);
   }
   let provider: ImageProviderId = "gemini";

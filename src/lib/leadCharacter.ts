@@ -10,6 +10,9 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { GoogleGenAI } from "@google/genai";
 import { getSupabase } from "@/lib/db";
+import { cleanLogoBytes, logoExtension, rasterizeLogo } from "@/lib/server/logos";
+import { appBaseUrl } from "@/lib/server/appUrl";
+import { notConfigured } from "@/lib/server/errors";
 import { fillPrompt, getPrompt, type Domain } from "@/lib/domains";
 import { DIRECTOR_MODEL_TIMEOUT_MS, geminiTextModels, SHEET_HEIGHT, SHEET_WIDTH } from "@/lib/imageGen/constants";
 import type { ImageGenerator } from "@/lib/imageGen/types";
@@ -47,9 +50,12 @@ export class LeadSetupError extends Error {
 
 let characterCache: ReferenceBuffer | null = null;
 
-/** Where public assets are fetched from when not on disk (Vercel): APP_BASE_URL, else the request origin. */
+/**
+ * Where public assets are fetched from when not on disk (Vercel): APP_BASE_URL. The request
+ * origin is only used in local development (a crafted Host header must never pick the URL, SEC-19).
+ */
 export function assetBaseUrl(requestOrigin: string): string {
-  return (process.env.APP_BASE_URL || requestOrigin).replace(/\/+$/, "");
+  return appBaseUrl(requestOrigin);
 }
 
 /** Test hook. */
@@ -90,40 +96,27 @@ export async function loadCharacterReference(baseUrl: string): Promise<Reference
   return characterCache;
 }
 
-const PROVIDER_IMAGE_TYPES = new Set(["image/png", "image/jpeg", "image/webp"]);
-
-function logoMime(blobType: string, logoPath: string): string {
-  const type = blobType.split(";")[0].trim().toLowerCase();
-  if (type.startsWith("image/")) return type === "image/jpg" ? "image/jpeg" : type;
-  const ext = logoPath.split(".").pop()?.toLowerCase();
-  if (ext === "jpg" || ext === "jpeg") return "image/jpeg";
-  if (ext === "webp") return "image/webp";
-  if (ext === "svg") return "image/svg+xml";
-  return "image/png";
-}
-
 /**
  * The customer's logo from the company-logos bucket as a provider-friendly image, or null when
- * there is no logo, it cannot be read, or it is a format neither provider accepts (e.g. SVG)
- * and `sharp` (if installed) cannot convert it. Never throws: no logo just means no logo on the character.
+ * there is no logo, it cannot be read, or it fails verification. An SVG is sanitised and then
+ * rasterised to PNG (src/lib/server/logos.ts), so uploaded SVG never reaches `sharp` as is (SEC-07);
+ * a raster logo must match its type's magic bytes. Never throws: no logo just means no logo on the character.
  */
 export async function loadLogoReference(logoPath: string | undefined): Promise<ReferenceBuffer | null> {
   if (!logoPath) return null;
   try {
+    const ext = logoExtension(logoPath);
+    if (!ext) return null;
     const { data: blob, error } = await getSupabase().storage.from(COMPANY_LOGOS_BUCKET).download(logoPath);
     if (error || !blob) return null;
-    let data = Buffer.from(await blob.arrayBuffer());
-    let mimeType = logoMime(blob.type ?? "", logoPath);
-    if (!PROVIDER_IMAGE_TYPES.has(mimeType)) {
-      try {
-        const sharp = (await import("sharp")).default;
-        data = Buffer.from(await sharp(data, { density: 300 }).png().toBuffer());
-        mimeType = "image/png";
-      } catch {
-        return null;
-      }
+    const bytes = new Uint8Array(await blob.arrayBuffer());
+    if (ext === ".svg") {
+      const png = await rasterizeLogo(bytes, ext);
+      return png ? { mimeType: "image/png", data: png } : null;
     }
-    return { mimeType, data };
+    const cleaned = cleanLogoBytes(ext, bytes);
+    if (!cleaned.ok) return null;
+    return { mimeType: ext === ".png" ? "image/png" : ext === ".webp" ? "image/webp" : "image/jpeg", data: Buffer.from(cleaned.bytes) };
   } catch {
     return null;
   }
@@ -297,7 +290,7 @@ export type TextGenerate = (prompt: string) => Promise<string>;
 export function createGeminiTextGenerate(apiKey: string | undefined): TextGenerate {
   const key = apiKey ?? process.env.GEMINI_API_KEY;
   return async (prompt) => {
-    if (!key) throw new Error("GEMINI_API_KEY is not set on the server, so the scene director cannot run.");
+    if (!key) throw notConfigured("The scene director");
     const ai = new GoogleGenAI({ apiKey: key });
     let lastError: unknown;
     for (const model of geminiTextModels()) {

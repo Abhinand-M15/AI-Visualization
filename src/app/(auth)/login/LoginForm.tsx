@@ -82,7 +82,7 @@ export function LoginForm({
   return (
     <AuthCard
       title="Log in"
-      subtitle="Welcome back. Sign in to continue to your stories."
+      subtitle="Welcome back. Log in to continue to your stories."
       footer={
         <>
           New here?{" "}
@@ -157,14 +157,14 @@ export function LoginForm({
               </Link>
             </div>
           ) : (
-            <p className="mt-2 text-right text-xs text-neutral-500 dark:text-indigo-200/50">
-              Forgot your password? Ask your admin to reset it.
+            <p className="mt-2 text-right text-xs text-muted-foreground">
+              Forgot your password? Ask the person who gave you access to reset it.
             </p>
           )}
         </div>
 
         <button type="submit" disabled={disabled || !email || !password} className={primaryButtonClass}>
-          {busy ? "Signing in…" : "Log in"}
+          {busy ? "Logging in…" : "Log in"}
         </button>
       </form>
     </AuthCard>

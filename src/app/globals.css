@@ -4,27 +4,67 @@
    default OS-preference-based strategy — this is what lets the button work. */
 @custom-variant dark (&:where(.dark, .dark *));
 
+/* ---------------------------------------------------------------------------
+   Design tokens. Every app screen reads these (through the Tailwind theme
+   below) instead of hard-coding colours, so light/dark, contrast and focus
+   stay consistent. Secondary text uses --muted-foreground (WCAG AA on the
+   page background in both themes); --ring is the one focus colour.
+   --------------------------------------------------------------------------- */
 :root {
+  color-scheme: light;
   --background: #ffffff;
   --foreground: #171717;
+  /* neutral-600: 7.6:1 on white */
+  --muted-foreground: #525252;
+  /* violet-600: 5.7:1 on white, also clearly different from the neutral-200 resting border */
+  --ring: #7c3aed;
+  --app-bar-height: 64px;
 }
 
 .dark {
+  color-scheme: dark;
   --background: #0a0a0a;
   --foreground: #ededed;
+  /* indigo-200 at 70%: about 6.3:1 on #0a0a0a */
+  --muted-foreground: rgba(199, 210, 254, 0.7);
+  /* violet-400: 6.9:1 on #0a0a0a */
+  --ring: #a78bfa;
 }
 
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-ring: var(--ring);
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
+}
+
+@theme {
+  /* App type roles: page title 28px (approved scale), section heading 18px. */
+  --text-title: 1.75rem;
+  --text-title--line-height: 2.25rem;
+  --text-section: 1.125rem;
+  --text-section--line-height: 1.75rem;
+  /* The one glow used by primary and success buttons. */
+  --shadow-glow: 0 0 24px rgba(139, 92, 246, 0.4);
+  --shadow-glow-success: 0 0 24px rgba(16, 185, 129, 0.4);
 }
 
 body {
   background: var(--background);
   color: var(--foreground);
   font-family: var(--font-sans), ui-sans-serif, system-ui, sans-serif;
+}
+
+/* Visible keyboard focus on every interactive element (WCAG 2.4.7 / 2.4.11).
+   In the base layer so a component can still opt into its own ring with a
+   utility class; app components no longer use focus:outline-none. */
+@layer base {
+  :where(a[href], button, input, select, textarea, summary, [tabindex]:not([tabindex="-1"])):focus-visible {
+    outline: 2px solid var(--ring);
+    outline-offset: 2px;
+  }
 }
 
 /* Slow diagonal drift for the space-theme starfield layer — nebula glow stays
@@ -47,14 +87,16 @@ body {
    custom properties (set inline per-element in SpaceBackdrop.tsx) so one
    keyframe set covers every meteor at a different position/timing without
    needing per-element <style> blocks. translateX moves along the already-
-   rotated local axis, so the streak travels in a straight diagonal line. */
+   rotated local axis, so the streak travels in a straight diagonal line.
+   Peak opacity is kept low so a streak crossing a heading never reads as a
+   strikethrough. */
 @keyframes meteor-fall {
   0% {
     transform: rotate(var(--meteor-angle, -35deg)) translateX(0);
     opacity: 0;
   }
   4% {
-    opacity: 1;
+    opacity: 0.4;
   }
   14% {
     opacity: 0;
@@ -70,6 +112,7 @@ body {
   height: 1.5px;
   width: 140px;
   border-radius: 999px;
+  opacity: 0;
   animation-name: meteor-fall;
   animation-timing-function: linear;
   animation-iteration-count: infinite;
@@ -148,40 +191,6 @@ body {
   animation: float-orb-c 24s ease-in-out infinite;
 }
 
-/* Unambiguous "this is the one to edit" cue for whichever chunk card the
-   scroll-linked focus effect (page.tsx) has scaled up to center — a glowing
-   ring plus an "Editing" badge, so there's a clear snap into an editable
-   state instead of a vague continuous fade the user can't read a moment for. */
-.chunk-card {
-  will-change: transform, opacity;
-}
-
-.chunk-card::before {
-  /* Sits just inside the card's own top edge (not poking out above the
-     border) so it can never be clipped by the scroll pane's overflow. */
-  content: "Editing";
-  position: absolute;
-  top: 10px;
-  left: 50%;
-  transform: translateX(-50%) translateY(-6px);
-  background: linear-gradient(90deg, #8b5cf6, #22d3ee);
-  color: #0a0a0a;
-  font-size: 10px;
-  font-weight: 600;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  padding: 3px 10px;
-  border-radius: 9999px;
-  box-shadow: 0 0 12px rgba(139, 92, 246, 0.45);
-  opacity: 0;
-  pointer-events: none;
-  transition: opacity 150ms ease-out, transform 150ms ease-out;
-}
-
-.chunk-card.chunk-card--active {
-  box-shadow: 0 0 0 2px rgba(139, 92, 246, 0.8), 0 0 40px rgba(139, 92, 246, 0.3);
-}
-
 /* Slim, theme-tinted scrollbar for the project page's scrolling panes
    (replaces the bright native bar that sat between the two columns). */
 .thin-scroll {
@@ -202,11 +211,6 @@ body {
   background: rgba(139, 92, 246, 0.6);
 }
 
-.chunk-card.chunk-card--active::before {
-  opacity: 1;
-  transform: translateX(-50%) translateY(0);
-}
-
 /* Indeterminate loading bar (story generation / regeneration / layout
    binding) — a single-shot Gemini call has no natural sub-steps to report,
    so this is an animated "something is happening" sweep rather than a real
@@ -223,4 +227,25 @@ body {
 
 .loading-bar-indeterminate-fill {
   animation: loading-bar-sweep 1.1s ease-in-out infinite;
+}
+
+/* Reduced motion: the backdrop stands still (no drift, meteors or rocks) and
+   the indeterminate bar becomes a calm static fill. */
+@media (prefers-reduced-motion: reduce) {
+  .stars-layer,
+  .orb-a,
+  .orb-b,
+  .orb-c {
+    animation: none;
+  }
+  .meteor,
+  .asteroid {
+    animation: none;
+    display: none;
+  }
+  .loading-bar-indeterminate-fill {
+    animation: none;
+    width: 100%;
+    opacity: 0.45;
+  }
 }

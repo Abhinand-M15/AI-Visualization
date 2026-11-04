@@ -5,11 +5,12 @@ import { CALLBACK_ERROR_MESSAGES } from "@/lib/auth/errors";
 import { firstParam, type AuthSearchParams } from "../_components/searchParams";
 import { LoginForm } from "./LoginForm";
 
-export const metadata: Metadata = { title: "Log in · Story Site Generator" };
+export const metadata: Metadata = { title: "Log in" };
 
 const INFO_MESSAGES: Record<string, string> = {
   signed_out: "You've been signed out.",
   password_updated: "Your password was updated. Log in with your new password.",
+  account_created: "Your account is ready. Log in with the email and password you just chose.",
 };
 
 export default async function LoginPage({ searchParams }: { searchParams: AuthSearchParams }) {

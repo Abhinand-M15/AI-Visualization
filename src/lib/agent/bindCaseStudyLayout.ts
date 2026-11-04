@@ -1,4 +1,5 @@
 import { GoogleGenAI } from "@google/genai";
+import { notConfigured, ProviderError, toProviderError } from "@/lib/server/errors";
 import type { CaseStudyDiagnostic, Chunk } from "@/lib/types";
 import { getLayoutBindingPrompt } from "@/lib/agent/systemPrompts";
 import {
@@ -68,9 +69,7 @@ export async function bindCaseStudyLayout(
     .replace("{{STORYLINE_JSON}}", JSON.stringify(toStorylineJson(title, chunks), null, 2));
 
   const key = apiKey ?? process.env.GEMINI_API_KEY;
-  if (!key) {
-    throw new Error("GEMINI_API_KEY is not set. Add it to .env.local (see .env.local.example).");
-  }
+  if (!key) throw notConfigured("Story generation");
   const ai = new GoogleGenAI({ apiKey: key });
 
   let lastError: unknown;
@@ -101,14 +100,14 @@ export async function bindCaseStudyLayout(
         };
       } catch (error) {
         lastError = error;
+        // A rejected key or a bad request will not work on the next model either (AR-15, UX-06).
+        const classified = toProviderError(error, "gemini");
+        if (classified instanceof ProviderError && !classified.retryable) throw classified;
         const delayMs = 500 * 2 ** attempt;
         await new Promise((resolve) => setTimeout(resolve, delayMs));
       }
     }
   }
-  throw new Error(
-    `Case-study layout binding failed after trying all models: ${
-      lastError instanceof Error ? lastError.message : String(lastError)
-    }`
-  );
+  console.error("case-study layout binding failed after trying all models:", lastError);
+  throw toProviderError(lastError, "gemini");
 }

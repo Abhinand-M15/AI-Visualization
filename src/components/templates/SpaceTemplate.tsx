@@ -7,7 +7,7 @@ import { ASMRBackground } from "@/components/ui/asmr-background";
 import { avatarForIndex, type TemplateProps } from "./types";
 import { AvatarDisplay } from "./AvatarDisplay";
 import { ChapterLayout, SceneImg, type ChapterMediaItem } from "./ChapterLayout";
-import { CHAPTER_THEMES, chapterLists } from "@/lib/chapterLayout";
+import { CHAPTER_THEMES, TEMPLATE_SANS, chapterLists } from "@/lib/chapterLayout";
 import { StoryLogo } from "./StoryLogo";
 import { NarrationMasterControl } from "@/components/ui/NarrationMasterControl";
 import { NARRATION_DOCK_THEMES } from "@/lib/narrationDock";
@@ -62,9 +62,10 @@ export default function SpaceTemplate({ title, chunks, avatars, logoUrl }: Templ
         // Only the words between the previous and the new position are
         // touched; the first event after a (re)start repaints them all.
         let shown = -2;
+        // Colours come from the shared chapter layout CSS: words dim only while
+        // this chapter's audio plays (cl-live), so the text is readable without sound.
         function setSpoken(word: HTMLElement, spoken: boolean) {
-          word.classList.toggle("text-white", spoken);
-          word.classList.toggle("text-white/25", !spoken);
+          word.classList.toggle("spoken", spoken);
         }
         function onTimeUpdate() {
           if (!audio.duration) return;
@@ -117,13 +118,13 @@ export default function SpaceTemplate({ title, chunks, avatars, logoUrl }: Templ
   }, [chunks]);
 
   return (
-    <div ref={containerRef} className="relative text-white">
+    <div ref={containerRef} className="relative text-white" style={{ fontFamily: TEMPLATE_SANS }}>
       <ASMRBackground />
       <NarrationMasterControl theme={NARRATION_DOCK_THEMES.space} />
       <StoryLogo logoUrl={logoUrl} />
 
-      <header className="relative px-10 pb-16 pt-24">
-        <span className="text-xs font-light uppercase tracking-[0.4em] text-white/30">Space</span>
+      <header className="relative px-8 pb-16 pt-24">
+        <span className="text-xs font-light uppercase tracking-[0.4em] text-white/60">Space</span>
         <h1 className="mt-4 max-w-3xl text-2xl font-medium leading-tight md:text-[1.75rem]">{title}</h1>
       </header>
 
@@ -158,7 +159,7 @@ export default function SpaceTemplate({ title, chunks, avatars, logoUrl }: Templ
                 style={{ fontSize: "clamp(0.9375rem, 1.25vw, 1.125rem)" }}
               >
                 {words.map((word, i) => (
-                  <span key={i} className="word text-white/25 transition-colors duration-150">
+                  <span key={i} className="word">
                     {word}{" "}
                   </span>
                 ))}

@@ -125,8 +125,22 @@ export function hasUnpublishedChanges(project: WithTimestamps): boolean | null {
   return null;
 }
 
+/**
+ * A publish runs for at most 300 s (Vercel's limit). A row still "publishing" after this
+ * long belongs to a run that was killed before it could record the outcome (UX-03): it is
+ * shown as failed, and the publish route lets a new publish take it over.
+ */
+export const PUBLISHING_STALE_MS = 6 * 60 * 1000;
+
+/** True when a "publishing" status is older than PUBLISHING_STALE_MS (judged by updatedAt, set when the publish starts). */
+export function isStalePublishing(project: WithTimestamps, now: number = Date.now()): boolean {
+  if (project.publishStatus !== "publishing" || !project.updatedAt) return false;
+  const started = Date.parse(project.updatedAt);
+  return !Number.isNaN(started) && now - started > PUBLISHING_STALE_MS;
+}
+
 export function getPublishState(project: WithTimestamps): PublishStateKey {
-  if (project.publishStatus === "publishing") return "publishing";
+  if (project.publishStatus === "publishing") return isStalePublishing(project) ? "failed" : "publishing";
   if (project.publishStatus === "failed") return "failed";
   if (project.publishStatus !== "published" || !project.publishedUrl) return "draft";
   return hasUnpublishedChanges(project) ? "changed" : "published";
